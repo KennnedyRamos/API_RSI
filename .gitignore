@@ -1,0 +1,16 @@
+# Ignorar o arquivo .env
+.env
+
+# Ignorar arquivos de banco de dados
+*.db
+
+# Ignorar arquivos de configuração local
+config/
+
+# Ignorar diretórios de migração do banco de dados
+migrations/
+
+# Ignorar outros arquivos desnecessários
+__pycache__/
+*.pyc
+*.pyo
