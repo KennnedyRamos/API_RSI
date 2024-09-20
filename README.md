@@ -59,9 +59,9 @@ Certifique-se de ter o **Python 3.x** instalado. Além disso, você precisa do *
    ```bash
    git clone https://github.com/seu-usuario/API_RSI.git
    cd API_RSI
+  ````
 ````
 ### Passos
-
 1. Crie um ambiente virtual e ative-o:
    ```bash
    python -m venv env
@@ -70,17 +70,20 @@ Certifique-se de ter o **Python 3.x** instalado. Além disso, você precisa do *
    # No macOS/Linux:
    source env/bin/activate
 ````
+````
 ### Instalação
 
 1. Instale as dependências:
    ```bash
    pip install -r requirements.txt
 ````
+````
 2. Configure a conexão com o banco de dados no arquivo de configuração.
 
 3. Execute a API:
    ```bash
    python main.py
+````
 ````
 ## Uso
 
