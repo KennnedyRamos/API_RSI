@@ -6,7 +6,7 @@ A **API RSI** é um serviço projetado para fornecer dados em tempo real sobre o
 
 ## Funcionalidades
 
-- **Cálculo do RSI:** Calcula o RSI para diferentes intervalos de tempo (5m, 30m, 1h, 4h).
+- **Cálculo do RSI:** Calcula o RSI para diferentes intervalos de tempo (5m, 15m, 30m, 1h, 4h, 12h, 1d, 1w, 1M).
 - **Armazenamento Dinâmico:** Armazena dados de RSI em um banco de dados PostgreSQL.
 - **Cache Eficiente:** Utiliza Redis para armazenar em cache os dados frequentemente acessados, melhorando a performance.
 - **APIs RESTful:** Oferece endpoints intuitivos para acesso a dados.
