@@ -1,2 +1,10 @@
 # database/__init__.py
-# Este arquivo inicializa o pacote database e configura o PostgreSQL.
+
+"""
+Camada de persistência da aplicação.
+
+Responsável por organizar:
+
+    - models
+    - repositories
+"""

@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from app import db
+from app.services.signal_alert_service import SignalAlertService
+from database.models.notification_delivery import NotificationDelivery
+from database.models.rsi import RSIData
+from database.models.signal_event import SignalEvent
+from database.repositories.rsi_snapshot_repository import (
+    RSISnapshotRepository,
+)
+from app.utils.timeframes import RSI_TIMEFRAMES
+from services.telegram_service import TelegramService
+
+
+def test_alerts_only_trigger_on_zone_entry():
+    assert SignalAlertService.determinar_evento(
+        {"rsi_previous": 69.84, "rsi": 72.41}
+    ) == "ENTER_OVERBOUGHT"
+    assert SignalAlertService.determinar_evento(
+        {"rsi_previous": 72.41, "rsi": 74.0}
+    ) is None
+    assert SignalAlertService.determinar_evento(
+        {"rsi_previous": 31.5, "rsi": 28.9}
+    ) == "ENTER_OVERSOLD"
+
+
+def test_telegram_message_uses_pt_br_formatting():
+    telegram = TelegramService(
+        enabled=False,
+        app_timezone="America/Sao_Paulo",
+    )
+    message = telegram.formatar_sinal(
+        {
+            "symbol": "BTC/USDT",
+            "ranking": 1,
+            "event_type": "ENTER_OVERBOUGHT",
+            "current_price": 104250,
+            "rsi": 72.41,
+            "intervalo": "1h",
+            "detected_at": "2026-08-21T20:42:00+00:00",
+            "change_24h": 3.82,
+            "rsi_previous": 69.84,
+            "rsi_difference": 2.57,
+            "volume_24h": 42_310_000_000,
+            "signal_level": "MODERATE",
+            "rsi_por_intervalo": {
+                "5m": 66.18,
+                "15m": 68.95,
+                "30m": 71.07,
+                "1h": 72.41,
+                "4h": 63.5,
+                "12h": None,
+                "1d": 58.42,
+                "1w": 54.11,
+                "1M": 49.8,
+            },
+        }
+    )
+
+    assert "BTC/USDT" in message
+    assert "$104.250,00" in message
+    assert "72,41" in message
+    assert "🔴 <b>OPERAÇÃO: VENDA</b>" in message
+    assert "Nível do sinal: Moderado" in message
+    assert "Entrada em sobrecompra" in message
+    assert "RSI 5m: 66,18" in message
+    assert "RSI 15m: 68,95" in message
+    assert "RSI 30m: 71,07" in message
+    assert "RSI 1h:" not in message
+    assert "RSI 4h: 63,50" in message
+    assert "RSI 12h: N/D" in message
+    assert "RSI 1d: 58,42" in message
+    assert "RSI 1W: 54,11" in message
+    assert "RSI 1M: 49,80" in message
+
+
+def test_telegram_message_marks_oversold_as_buy():
+    telegram = TelegramService(enabled=False)
+    message = telegram.formatar_sinal(
+        {
+            "symbol": "ETH/USDT",
+            "event_type": "ENTER_OVERSOLD",
+        }
+    )
+
+    assert "🟢 <b>OPERAÇÃO: COMPRA</b>" in message
+    assert "Entrada em sobrevenda" in message
+
+
+def test_telegram_message_marks_unknown_event_as_analyze():
+    telegram = TelegramService(enabled=False)
+    message = telegram.formatar_sinal(
+        {
+            "symbol": "ETH/USDT",
+            "event_type": "UNKNOWN",
+        }
+    )
+
+    assert "⚪ <b>OPERAÇÃO: ANALISAR</b>" in message
+    assert "Movimento de RSI" in message
+
+
+def test_event_and_outbox_are_idempotent(app):
+    with app.app_context():
+        timestamp = datetime(
+            2026,
+            8,
+            21,
+            20,
+            tzinfo=timezone.utc,
+        ).replace(tzinfo=None)
+        rsi_por_intervalo = {
+            "5m": 65.12,
+            "15m": 67.34,
+            "30m": 70.01,
+            "1h": 72.41,
+            "4h": 61.78,
+            "12h": 58.92,
+            "1d": 55.67,
+            "1w": 52.45,
+            "1M": 49.23,
+        }
+        registros: dict[str, RSIData] = {}
+
+        for intervalo in RSI_TIMEFRAMES:
+            rsi = rsi_por_intervalo[intervalo]
+            registro = RSIData(
+                symbol="BTC/USDT",
+                intervalo=intervalo,
+                rsi=rsi,
+                rsi_previous=69.84 if intervalo == "1h" else rsi - 1,
+                rsi_difference=2.57 if intervalo == "1h" else 1.0,
+                timestamp=timestamp,
+                rsi_status="OVERBOUGHT" if rsi >= 70 else "NORMAL",
+                signal_type="OVERBOUGHT" if rsi >= 70 else None,
+                signal_level="MODERATE",
+                current_price=104250.0,
+                change_24h=3.82,
+                volume_24h=42_310_000_000.0,
+                ranking=1,
+            )
+            registros[intervalo] = registro
+            db.session.add(registro)
+
+        db.session.commit()
+
+        for intervalo, registro in registros.items():
+            RSISnapshotRepository.atualizar(
+                symbol=registro.symbol,
+                intervalo=intervalo,
+                rsi_data_id=registro.id,
+            )
+
+        registro = registros["1h"]
+
+        telegram = TelegramService(
+            enabled=True,
+            bot_token="token-de-teste",
+            chat_id="-100123",
+        )
+        service = SignalAlertService(telegram=telegram)
+        resultado = {
+            "rsi_data_id": registro.id,
+            "symbol": registro.symbol,
+            "intervalo": registro.intervalo,
+            "rsi": registro.rsi,
+            "rsi_previous": registro.rsi_previous,
+            "rsi_difference": registro.rsi_difference,
+            "timestamp": registro.timestamp,
+            "signal_level": registro.signal_level,
+            "current_price": registro.current_price,
+            "change_24h": registro.change_24h,
+            "volume_24h": registro.volume_24h,
+            "ranking": registro.ranking,
+        }
+
+        primeiro = service.registrar_resultados([resultado])
+        segundo = service.registrar_resultados([resultado])
+
+        assert primeiro == {
+            "events_created": 1,
+            "deliveries_created": 1,
+        }
+        assert segundo == {
+            "events_created": 0,
+            "deliveries_created": 0,
+        }
+        assert SignalEvent.query.count() == 1
+        assert NotificationDelivery.query.count() == 1
+        entrega = NotificationDelivery.query.one()
+        assert entrega.payload["rsi_por_intervalo"] == rsi_por_intervalo

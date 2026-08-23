@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#07111f">
+    <title>RSI Radar — Sinais de Cripto</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/dashboard" aria-label="RSI Radar">
+          <span class="brand-mark">◔</span>
+          <span>RSI <b>Radar</b></span>
+        </a>
+        <div class="topbar-actions">
+          <span class="connection" id="connection-status">
+            <i></i> Dados do mercado
+          </span>
+          <a class="api-link" href="/api/v1/health" target="_blank" rel="noreferrer">API</a>
+        </div>
+      </header>
+
+      <section class="hero">
+        <div>
+          <p class="eyebrow">MONITORAMENTO DE MOMENTUM</p>
+          <h1>Encontre movimentos<br><span>antes do próximo candle.</span></h1>
+          <p class="hero-copy">
+            Sinais ativos de sobrecompra e sobrevenda calculados sobre candles fechados.
+          </p>
+        </div>
+        <aside class="notice">
+          <span>⚡</span>
+          <p>Os alertas do Telegram são disparados apenas na entrada de uma zona RSI.</p>
+        </aside>
+      </section>
+
+      <section class="filter-panel" aria-label="Filtros de sinais">
+        <form id="search-form" class="search-box">
+          <label for="symbol-search">Buscar ativo</label>
+          <div>
+            <span>⌕</span>
+            <input id="symbol-search" name="symbol" autocomplete="off" placeholder="BTCUSDT ou BTC/USDT">
+            <button type="submit">Analisar</button>
+          </div>
+          <div class="suggestions" id="symbol-suggestions" hidden></div>
+        </form>
+
+        <div class="filter-group">
+          <span class="filter-label">Timeframe</span>
+          <div class="timeframes" id="timeframes" role="group" aria-label="Timeframe"></div>
+        </div>
+
+        <label class="select-field">
+          <span>Direção</span>
+          <select id="signal-type">
+            <option value="">Todos os sinais</option>
+            <option value="OVERBOUGHT">Sobrecompra</option>
+            <option value="OVERSOLD">Sobrevenda</option>
+          </select>
+        </label>
+
+        <label class="select-field">
+          <span>Força</span>
+          <select id="signal-level">
+            <option value="">Todas as forças</option>
+            <option value="EXTREME">Extremo</option>
+            <option value="STRONG">Forte</option>
+            <option value="MODERATE">Moderado</option>
+          </select>
+        </label>
+
+        <button id="refresh" class="refresh" type="button">↻ Atualizar</button>
+      </section>
+
+      <section class="metrics" aria-label="Resumo do mercado">
+        <article class="metric-card">
+          <span>Sinais ativos</span>
+          <strong id="metric-total">—</strong>
+          <small id="metric-total-caption">carregando dados</small>
+        </article>
+        <article class="metric-card overbought">
+          <span>Em sobrecompra</span>
+          <strong id="metric-overbought">—</strong>
+          <small>RSI ≥ 70</small>
+        </article>
+        <article class="metric-card oversold">
+          <span>Em sobrevenda</span>
+          <strong id="metric-oversold">—</strong>
+          <small>RSI ≤ 30</small>
+        </article>
+        <article class="metric-card">
+          <span>Maior intensidade</span>
+          <strong id="metric-strongest">—</strong>
+          <small id="metric-strongest-caption">aguardando sinais</small>
+        </article>
+      </section>
+
+      <section class="workspace">
+        <section class="panel signal-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">RADAR ATUAL</p>
+              <h2>Sinais que merecem atenção</h2>
+            </div>
+            <span id="table-status" class="table-status">Carregando…</span>
+          </div>
+          <div class="signal-table-wrap">
+            <table class="signal-table">
+              <thead>
+                <tr>
+                  <th>Ativo</th>
+                  <th>RSI</th>
+                  <th>Variação RSI</th>
+                  <th>Preço</th>
+                  <th>24h</th>
+                  <th>Nível</th>
+                </tr>
+              </thead>
+              <tbody id="signals-body"></tbody>
+            </table>
+            <div id="empty-state" class="empty-state" hidden>
+              <span>◌</span>
+              <h3>Nenhum sinal com estes filtros</h3>
+              <p>Experimente outro timeframe ou acompanhe o próximo fechamento de candle.</p>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel analysis-panel" id="analysis-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">ANÁLISE DO ATIVO</p>
+              <h2 id="asset-title">Selecione um par</h2>
+            </div>
+            <span class="asset-timeframe" id="asset-timeframe">—</span>
+          </div>
+
+          <div id="asset-placeholder" class="analysis-placeholder">
+            <span>⌁</span>
+            <p>Escolha um sinal ou pesquise um par para ver o histórico de RSI e preço.</p>
+          </div>
+
+          <div id="asset-content" hidden>
+            <div class="asset-stats" id="asset-stats"></div>
+            <div class="chart-card">
+              <div class="chart-title"><span>RSI histórico</span><small>zonas 70 / 30</small></div>
+              <div id="rsi-chart" class="chart" aria-label="Gráfico de RSI"></div>
+            </div>
+            <div class="chart-card">
+              <div class="chart-title"><span>Preço de fechamento</span><small id="price-chart-caption">Binance</small></div>
+              <div id="price-chart" class="chart" aria-label="Gráfico de preço"></div>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <footer>
+        <span>RSI Radar</span>
+        <span>Indicador técnico. Não constitui recomendação de compra ou venda.</span>
+      </footer>
+    </main>
+    <script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
+  </body>
+</html>

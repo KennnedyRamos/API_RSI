@@ -1,4 +1,11 @@
 # Ignora arquivos específicos da sua configuração local
 .env
+.env.production
+deploy/.env.production
 .vscode/
 .idea/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/

@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Qualidade e testes
+pytest>=8.0,<9.0
+ruff>=0.8,<1.0

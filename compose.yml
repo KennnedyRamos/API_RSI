@@ -1,0 +1,122 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-deploy/.env.production}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rsi-radar:local
+    restart: "no"
+    env_file:
+      - ${ENV_FILE:-deploy/.env.production}
+    command: ["flask", "--app", "main:app", "db", "upgrade"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rsi-radar:local
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-deploy/.env.production}
+    command:
+      - sh
+      - -c
+      - >-
+        exec gunicorn --bind 0.0.0.0:8000
+        --workers "$${GUNICORN_WORKERS:-1}"
+        --threads "$${GUNICORN_THREADS:-4}"
+        --timeout "$${GUNICORN_TIMEOUT_SECONDS:-60}"
+        --graceful-timeout 30
+        --access-logfile - --error-logfile - main:app
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rsi-radar:local
+    restart: unless-stopped
+    stop_grace_period: 60s
+    env_file:
+      - ${ENV_FILE:-deploy/.env.production}
+    command: ["python", "worker.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:?Defina CADDY_DOMAIN no arquivo de produção.}
+      CADDY_EMAIL: ${CADDY_EMAIL:?Defina CADDY_EMAIL no arquivo de produção.}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

@@ -1,4 +1,4 @@
-# main.py
+# worker.py
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import os
 
 from dotenv import load_dotenv
 
-from app import create_app
+from workers.rsi_worker import rsi_worker
 
 
 # ==========================================================
@@ -34,43 +34,27 @@ logging.basicConfig(
     ),
 )
 
-
-# ==========================================================
-# APP
-# ==========================================================
-
-app = create_app()
+logger = logging.getLogger(
+    __name__
+)
 
 
 # ==========================================================
-# EXECUÇÃO
+# MAIN
 # ==========================================================
+
+def main() -> None:
+
+    logger.info(
+        "Iniciando RSI Worker."
+    )
+
+    # O RSIWorker possui uma agenda própria baseada no fechamento
+    # real dos candles. Mantê-lo em execução contínua evita que o
+    # scheduler reinicialize a agenda a cada disparo.
+    rsi_worker.executar()
+
 
 if __name__ == "__main__":
 
-    host = os.getenv(
-        "FLASK_HOST",
-        "127.0.0.1",
-    )
-
-    port = int(
-        os.getenv(
-            "FLASK_PORT",
-            "5000",
-        )
-    )
-
-    debug = (
-        os.getenv(
-            "FLASK_DEBUG",
-            "false",
-        )
-        .lower()
-        == "true"
-    )
-
-    app.run(
-        host=host,
-        port=port,
-        debug=debug,
-    )
+    main()

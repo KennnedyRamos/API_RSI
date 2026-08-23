@@ -1,0 +1,14 @@
+*
+!app/
+!app/**
+!database/
+!database/**
+!migrations/
+!migrations/**
+!services/
+!services/**
+!workers/
+!workers/**
+!main.py
+!worker.py
+!requirements.txt
