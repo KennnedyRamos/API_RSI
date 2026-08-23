@@ -4,13 +4,13 @@ from datetime import datetime, timezone
 
 from app import db
 from app.services.signal_alert_service import SignalAlertService
+from app.utils.timeframes import RSI_TIMEFRAMES
 from database.models.notification_delivery import NotificationDelivery
 from database.models.rsi import RSIData
 from database.models.signal_event import SignalEvent
 from database.repositories.rsi_snapshot_repository import (
     RSISnapshotRepository,
 )
-from app.utils.timeframes import RSI_TIMEFRAMES
 from services.telegram_service import TelegramService
 
 
@@ -100,6 +100,39 @@ def test_telegram_message_marks_unknown_event_as_analyze():
 
     assert "⚪ <b>OPERAÇÃO: ANALISAR</b>" in message
     assert "Movimento de RSI" in message
+
+
+def test_telegram_message_keeps_precision_for_low_price_and_translates_level():
+    telegram = TelegramService(enabled=False)
+    message = telegram.formatar_sinal(
+        {
+            "symbol": "LOW/USDT",
+            "event_type": "ENTER_OVERBOUGHT",
+            "current_price": "0.00012345",
+            "signal_level": "STRONG",
+            "intervalo": "30m",
+        }
+    )
+
+    assert "Valor atual: $0,00012345" in message
+    assert "Nível do sinal: Forte" in message
+
+
+def test_telegram_message_keeps_rsi_layout_for_legacy_outbox_payload():
+    telegram = TelegramService(enabled=False)
+    message = telegram.formatar_sinal(
+        {
+            "symbol": "DUSK/USDT",
+            "event_type": "ENTER_OVERBOUGHT",
+            "intervalo": "30m",
+        }
+    )
+
+    assert "RSI 5m: N/D" in message
+    assert "RSI 15m: N/D" in message
+    assert "RSI 30m:" not in message
+    assert "RSI 1h: N/D" in message
+    assert "RSI 4h: N/D" in message
 
 
 def test_event_and_outbox_are_idempotent(app):

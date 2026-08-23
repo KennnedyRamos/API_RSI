@@ -4,6 +4,7 @@ import html
 import logging
 import os
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -33,6 +34,7 @@ class TelegramService:
 
     API_BASE_URL = "https://api.telegram.org"
     DEFAULT_TIMEOUT_SECONDS = 10.0
+    MAX_PRICE_DECIMAL_PLACES = 8
 
     def __init__(
         self,
@@ -259,8 +261,11 @@ class TelegramService:
         """Lista os outros RSI sem repetir o período que gerou o alerta."""
 
         valores = payload.get("rsi_por_intervalo")
+        # Entregas antigas da outbox não possuíam este snapshot. Ainda
+        # exibimos a grade para que a mensagem mantenha o mesmo layout; os
+        # períodos indisponíveis aparecem como N/D.
         if not isinstance(valores, dict):
-            return []
+            valores = {}
 
         intervalo_alerta = str(payload.get("intervalo", "")).strip()
         if intervalo_alerta.lower() == "1w":
@@ -343,8 +348,39 @@ class TelegramService:
 
     @classmethod
     def _formatar_moeda(cls, value: Any) -> str:
-        numero = cls._formatar_numero(value)
+        numero = cls._formatar_preco(value)
         return "$" + numero if numero != "N/D" else numero
+
+    @classmethod
+    def _formatar_preco(cls, value: Any) -> str:
+        """Formata preços preservando a precisão de moedas baratas.
+
+        O RSI e os percentuais permanecem com duas casas, mas um preço
+        como ``0.00012345`` não pode ser reduzido para ``0,00``. Mantemos
+        no máximo oito casas decimais, removendo apenas zeros supérfluos
+        e conservando pelo menos duas casas para a leitura pt-BR.
+        """
+
+        try:
+            numero = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return "N/D"
+
+        if not numero.is_finite():
+            return "N/D"
+
+        texto = format(
+            numero,
+            f",.{cls.MAX_PRICE_DECIMAL_PLACES}f",
+        )
+        inteiro, decimal = texto.split(".")
+        decimal = decimal.rstrip("0").ljust(2, "0")
+        texto = f"{inteiro}.{decimal}"
+
+        return texto.replace(",", "X").replace(
+            ".",
+            ",",
+        ).replace("X", ".")
 
     @classmethod
     def _formatar_volume(cls, value: Any) -> str:
