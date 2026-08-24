@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -480,6 +481,77 @@ class RSIService:
         )
 
         return resultado
+
+    # ==========================================================
+    # RESUMO RSI EM TEMPO REAL
+    # ==========================================================
+
+    def obter_rsi_atuais(
+        self,
+        *,
+        symbol: str,
+        intervalos: Iterable[str],
+    ) -> dict[str, float]:
+        """Obtém o RSI do último candle fechado de cada período.
+
+        Esta leitura é usada na composição de alertas. Ela não grava candles
+        nem consulta ticker ou ranking: busca somente o OHLCV necessário para
+        preencher os períodos que ainda não possuem snapshot no banco.
+        """
+
+        symbol = self._normalizar_symbol(symbol)
+        intervalos_unicos = tuple(
+            dict.fromkeys(
+                str(intervalo).strip()
+                for intervalo in intervalos
+                if str(intervalo).strip()
+            )
+        )
+        valores: dict[str, float] = {}
+
+        for intervalo in intervalos_unicos:
+            try:
+                self._validar_intervalo(intervalo)
+                candles = self.binance.get_ohlcv(
+                    symbol=symbol,
+                    timeframe=intervalo,
+                    limit=self.CANDLES_NECESSARIOS,
+                )
+                self._validar_candles(
+                    candles=candles,
+                    symbol=symbol,
+                    intervalo=intervalo,
+                )
+
+                candles_fechados = self._obter_candles_fechados(
+                    candles,
+                )
+                quantidade_minima = self.PERIODO_RSI + 2
+                if len(candles_fechados) < quantidade_minima:
+                    raise ValueError(
+                        "Candles fechados insuficientes para calcular RSI "
+                        f"| symbol={symbol} | intervalo={intervalo}",
+                    )
+
+                rsi_atual = calcular_rsi_wilder(
+                    closes=self._extrair_closes(candles_fechados),
+                    periodo=self.PERIODO_RSI,
+                )
+                self._validar_rsi(
+                    rsi=rsi_atual,
+                    nome="RSI atual",
+                    symbol=symbol,
+                )
+                valores[intervalo] = rsi_atual
+            except Exception:
+                logger.exception(
+                    "Não foi possível obter RSI em tempo real | "
+                    "symbol=%s | intervalo=%s",
+                    symbol,
+                    intervalo,
+                )
+
+        return valores
 
     # ==========================================================
     # NORMALIZAR SÍMBOLO

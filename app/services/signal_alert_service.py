@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from app.services.rsi_service import RSIService, rsi_service
 from app.utils.timeframes import RSI_TIMEFRAMES
 from database.repositories import (
     NotificationDeliveryRepository,
@@ -37,11 +38,13 @@ class SignalAlertService:
         event_repository=SignalEventRepository,
         delivery_repository=NotificationDeliveryRepository,
         snapshot_repository=RSISnapshotRepository,
+        rsi_service_instance: RSIService | None = None,
         telegram: TelegramService | None = None,
     ) -> None:
         self.event_repository = event_repository
         self.delivery_repository = delivery_repository
         self.snapshot_repository = snapshot_repository
+        self.rsi_service = rsi_service_instance or rsi_service
         self.telegram = telegram or telegram_service
         self.max_dispatch_per_cycle = int(
             os.getenv(
@@ -164,12 +167,20 @@ class SignalAlertService:
         entregas = self.delivery_repository.buscar_pendentes(
             limite=self.max_dispatch_per_cycle,
         )
+        rsi_por_symbol: dict[str, dict[str, float | None]] = {}
 
         for entrega in entregas:
             try:
+                payload = self._enriquecer_payload_rsi(
+                    entrega.payload,
+                    rsi_por_symbol=rsi_por_symbol,
+                )
+                if payload != entrega.payload:
+                    entrega.payload = payload
+
                 self.delivery_repository.marcar_enviando(entrega)
                 message_id = self.telegram.enviar_sinal(
-                    entrega.payload,
+                    payload,
                 )
                 self.delivery_repository.marcar_enviado(
                     entrega,
@@ -312,14 +323,84 @@ class SignalAlertService:
                 "Não foi possível obter o resumo RSI | symbol=%s",
                 symbol,
             )
-            return rsi_por_intervalo
+            valores_atuais = {}
 
         for intervalo in RSI_TIMEFRAMES:
             rsi_por_intervalo[intervalo] = valores_atuais.get(
                 intervalo,
             )
 
+        intervalos_sem_snapshot = tuple(
+            intervalo
+            for intervalo, rsi in rsi_por_intervalo.items()
+            if rsi is None
+        )
+        if not intervalos_sem_snapshot:
+            return rsi_por_intervalo
+
+        # Um snapshot ausente acontece, por exemplo, no primeiro ciclo do
+        # worker. Para o alerta não sair com N/D, consulta diretamente a
+        # Binance apenas para os períodos faltantes.
+        try:
+            valores_em_tempo_real = self.rsi_service.obter_rsi_atuais(
+                symbol=symbol,
+                intervalos=intervalos_sem_snapshot,
+            )
+        except Exception:
+            logger.exception(
+                "Não foi possível completar o resumo RSI em tempo real | "
+                "symbol=%s",
+                symbol,
+            )
+            return rsi_por_intervalo
+
+        for intervalo in intervalos_sem_snapshot:
+            rsi_em_tempo_real = valores_em_tempo_real.get(intervalo)
+            if rsi_em_tempo_real is not None:
+                rsi_por_intervalo[intervalo] = rsi_em_tempo_real
+
         return rsi_por_intervalo
+
+    def _enriquecer_payload_rsi(
+        self,
+        payload: dict[str, Any],
+        *,
+        rsi_por_symbol: dict[str, dict[str, float | None]],
+    ) -> dict[str, Any]:
+        """Completa entregas pendentes criadas antes da hidratação RSI."""
+
+        valores_do_payload = payload.get("rsi_por_intervalo")
+        if isinstance(valores_do_payload, dict) and all(
+            valores_do_payload.get(intervalo) is not None
+            for intervalo in RSI_TIMEFRAMES
+        ):
+            return payload
+
+        symbol = str(payload.get("symbol", "")).strip()
+        if not symbol:
+            return payload
+
+        if symbol not in rsi_por_symbol:
+            rsi_por_symbol[symbol] = self._obter_rsi_por_intervalo(
+                symbol,
+            )
+
+        resumo_atual = rsi_por_symbol[symbol]
+        resumo = {
+            intervalo: (
+                resumo_atual.get(intervalo)
+                if resumo_atual.get(intervalo) is not None
+                else (
+                    valores_do_payload.get(intervalo)
+                    if isinstance(valores_do_payload, dict)
+                    else None
+                )
+            )
+            for intervalo in RSI_TIMEFRAMES
+        }
+        payload_atualizado = dict(payload)
+        payload_atualizado["rsi_por_intervalo"] = resumo
+        return payload_atualizado
 
     @staticmethod
     def _criar_payload(

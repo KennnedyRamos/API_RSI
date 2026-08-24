@@ -135,6 +135,87 @@ def test_telegram_message_keeps_rsi_layout_for_legacy_outbox_payload():
     assert "RSI 4h: N/D" in message
 
 
+def test_alert_service_fills_missing_rsi_with_live_values():
+    class SnapshotRepositoryFake:
+        @staticmethod
+        def buscar_rsi_atuais(*, symbol, intervalos):
+            assert symbol == "DUSK/USDT"
+            assert tuple(intervalos) == RSI_TIMEFRAMES
+            return {"5m": 72.82}
+
+    class RSIServiceFake:
+        def __init__(self):
+            self.calls = []
+
+        def obter_rsi_atuais(self, *, symbol, intervalos):
+            self.calls.append((symbol, tuple(intervalos)))
+            return {
+                intervalo: 40.0 + indice
+                for indice, intervalo in enumerate(intervalos)
+            }
+
+    rsi_service_fake = RSIServiceFake()
+    service = SignalAlertService(
+        snapshot_repository=SnapshotRepositoryFake,
+        rsi_service_instance=rsi_service_fake,
+        telegram=TelegramService(enabled=False),
+    )
+
+    resumo = service._obter_rsi_por_intervalo("DUSK/USDT")
+
+    assert resumo["5m"] == 72.82
+    assert all(valor is not None for valor in resumo.values())
+    assert rsi_service_fake.calls == [
+        ("DUSK/USDT", RSI_TIMEFRAMES[1:]),
+    ]
+
+
+def test_alert_service_enriches_incomplete_pending_payload():
+    class SnapshotRepositoryFake:
+        @staticmethod
+        def buscar_rsi_atuais(*, symbol, intervalos):
+            assert symbol == "DUSK/USDT"
+            assert tuple(intervalos) == RSI_TIMEFRAMES
+            return {}
+
+    class RSIServiceFake:
+        def __init__(self):
+            self.calls = []
+
+        def obter_rsi_atuais(self, *, symbol, intervalos):
+            self.calls.append((symbol, tuple(intervalos)))
+            return {
+                intervalo: 50.0 + indice
+                for indice, intervalo in enumerate(intervalos)
+            }
+
+    rsi_service_fake = RSIServiceFake()
+    service = SignalAlertService(
+        snapshot_repository=SnapshotRepositoryFake,
+        rsi_service_instance=rsi_service_fake,
+        telegram=TelegramService(enabled=False),
+    )
+    payload = {
+        "symbol": "DUSK/USDT",
+        "intervalo": "5m",
+        "rsi_por_intervalo": {"5m": 72.82},
+    }
+
+    resultado = service._enriquecer_payload_rsi(
+        payload,
+        rsi_por_symbol={},
+    )
+
+    assert all(
+        resultado["rsi_por_intervalo"][intervalo] is not None
+        for intervalo in RSI_TIMEFRAMES
+    )
+    assert resultado["rsi_por_intervalo"]["5m"] == 50.0
+    assert rsi_service_fake.calls == [
+        ("DUSK/USDT", RSI_TIMEFRAMES),
+    ]
+
+
 def test_event_and_outbox_are_idempotent(app):
     with app.app_context():
         timestamp = datetime(

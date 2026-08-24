@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.services.rsi_service import RSIService
 from app.utils.rsi import (
     calcular_diferenca_rsi,
     calcular_rsi_anterior,
@@ -12,7 +13,6 @@ from app.utils.rsi import (
     classificar_rsi,
     classificar_tipo_sinal,
 )
-
 
 # ==========================================================
 # RSI WILDER
@@ -243,3 +243,51 @@ def test_rsi_insuficiente():
             closes=closes,
             periodo=14,
         )
+
+
+# ==========================================================
+# RSI EM TEMPO REAL PARA ALERTAS
+# ==========================================================
+
+def test_obter_rsi_atuais_usa_apenas_candle_fechado():
+    """O candle em forma\u00e7\u00e3o n\u00e3o pode alterar o RSI do alerta."""
+
+    closes = [
+        100.0 + ((indice % 5) - 2) * 1.5
+        for indice in range(RSIService.CANDLES_NECESSARIOS - 1)
+    ]
+    closes.append(1_000.0)
+    candles = [
+        [indice, close, close, close, close, 0.0]
+        for indice, close in enumerate(closes)
+    ]
+
+    class BinanceFake:
+        def __init__(self):
+            self.calls = []
+
+        @staticmethod
+        def validar_symbol(symbol):
+            return symbol
+
+        def get_ohlcv(self, *, symbol, timeframe, limit):
+            self.calls.append((symbol, timeframe, limit))
+            return candles
+
+    binance = BinanceFake()
+    service = RSIService(binance=binance)
+
+    valores = service.obter_rsi_atuais(
+        symbol="BTC/USDT",
+        intervalos=("5m", "1h"),
+    )
+
+    esperado = calcular_rsi_wilder(
+        closes=closes[:-1],
+        periodo=RSIService.PERIODO_RSI,
+    )
+    assert valores == {"5m": esperado, "1h": esperado}
+    assert binance.calls == [
+        ("BTC/USDT", "5m", RSIService.CANDLES_NECESSARIOS),
+        ("BTC/USDT", "1h", RSIService.CANDLES_NECESSARIOS),
+    ]
