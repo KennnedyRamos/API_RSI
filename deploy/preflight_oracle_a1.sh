@@ -38,7 +38,14 @@ require_env_value() {
 
 architecture=$(uname -m)
 case "$architecture" in
-    aarch64|arm64) ;;
+    aarch64|arm64)
+        architecture_label="ARM64"
+        ;;
+    x86_64|amd64)
+        [[ "${PRECHECK_ALLOW_X86:-false}" == "true" ]] || fail \
+            "Esta VM não é ARM64 (arquitetura detectada: $architecture). Use uma Oracle A1."
+        architecture_label="x86_64 (modo E2 Micro temporário)"
+        ;;
     *) fail "Esta VM não é ARM64 (arquitetura detectada: $architecture). Use uma Oracle A1." ;;
 esac
 
@@ -69,4 +76,4 @@ fi
 
 ENV_FILE="$env_file" docker compose --env-file "$env_file" config --quiet
 
-printf 'OK: VM ARM64, Docker Compose e configuração de produção validados.\n'
+printf 'OK: VM %s, Docker Compose e configuração de produção validados.\n' "$architecture_label"

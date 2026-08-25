@@ -4,8 +4,10 @@ Este projeto executa API Flask, worker RSI e PostgreSQL em uma única VM
 Oracle. A configuração indicada para produção é a **VM.Standard.A1.Flex**
 Always Free com **1 OCPU e 6 GB de RAM**.
 
-> Não use a E2 Micro de 1 GB para API + worker + banco. Ela é insuficiente
-> para a coleta contínua de todos os pares e timeframes.
+> Não use a E2 Micro de 1 GB como destino final para API + worker + banco.
+> Ela é insuficiente para a coleta contínua de todos os pares e timeframes.
+> Em caso de espera por capacidade A1, há um modo temporário reduzido em
+> [ORACLE_E2_MICRO_TEMPORARY.md](ORACLE_E2_MICRO_TEMPORARY.md).
 
 O worker já é contínuo. Não inicie `workers/scheduler.py` junto com
 `worker.py`, pois isso duplicaria o processamento.

@@ -75,6 +75,8 @@ Abra [http://127.0.0.1:5000/dashboard](http://127.0.0.1:5000/dashboard).
 Para produção sem custo mensal, a arquitetura preparada é Oracle Cloud Always
 Free para API, worker e PostgreSQL, com o Render reservado ao futuro frontend
 estático. Consulte o [guia de deploy na Oracle](deploy/ORACLE_ALWAYS_FREE.md).
+Enquanto a A1 de 6 GB não tiver capacidade, há também um
+[modo temporário para a E2 Micro de 1 GB](deploy/ORACLE_E2_MICRO_TEMPORARY.md).
 
 ## Configurar o Telegram
 

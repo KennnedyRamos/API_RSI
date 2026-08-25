@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -184,6 +185,9 @@ class RSIWorker:
         alert_service_instance: Optional[
             SignalAlertService
         ] = None,
+        symbols: Optional[
+            list[str]
+        ] = None,
     ) -> None:
         """
         Inicializa o Worker.
@@ -266,12 +270,33 @@ class RSIWorker:
         # INTERVALOS
         # ------------------------------------------------------
 
-        self.intervalos = self._normalizar_intervalos(
+        intervalos_configurados = (
             intervalos
             if intervalos is not None
-            else list(
+            else self._csv_env(
+                "RSI_WORKER_INTERVALS"
+            )
+        )
+
+        self.intervalos = self._normalizar_intervalos(
+            intervalos_configurados
+            or list(
                 self.DEFAULT_INTERVALOS
             )
+        )
+
+        # Em produção normal, o Worker acompanha todos os pares USDT.
+        # Em máquinas pequenas, RSI_WORKER_SYMBOLS permite restringir a
+        # coleta a uma lista explícita sem alterar o comportamento padrão.
+        symbols_configurados = (
+            symbols
+            if symbols is not None
+            else self._csv_env(
+                "RSI_WORKER_SYMBOLS"
+            )
+        )
+        self.symbols_configurados = self._normalizar_symbols(
+            symbols_configurados
         )
 
         # ------------------------------------------------------
@@ -396,12 +421,14 @@ class RSIWorker:
             "check=%ss | "
             "delay_candle=%ss | "
             "max_retries=%d | "
-            "workers=%d",
+            "workers=%d | "
+            "symbols_configurados=%d",
             self.intervalos,
             self.intervalo_ciclo,
             self.candle_close_delay_seconds,
             self.max_retries,
             self.max_timeframe_workers,
+            len(self.symbols_configurados),
         )
 
     # ==========================================================
@@ -487,6 +514,23 @@ class RSIWorker:
     # NORMALIZAR INTERVALOS
     # ==========================================================
 
+    @staticmethod
+    def _csv_env(
+        nome: str,
+    ) -> list[str]:
+        """Lê uma lista CSV opcional sem considerar valores vazios."""
+
+        valor = os.getenv(
+            nome,
+            "",
+        )
+
+        return [
+            item.strip()
+            for item in valor.split(",")
+            if item.strip()
+        ]
+
     def _normalizar_intervalos(
         self,
         intervalos: list[str],
@@ -546,6 +590,31 @@ class RSIWorker:
             raise ValueError(
                 "Nenhum intervalo válido foi informado."
             )
+
+        return resultado
+
+    def _normalizar_symbols(
+        self,
+        symbols: Optional[
+            list[str]
+        ],
+    ) -> list[str]:
+        """Normaliza pares USDT opcionais preservando ordem e unicidade."""
+
+        if not symbols:
+            return []
+
+        resultado: list[str] = []
+
+        for symbol in symbols:
+            normalizado = self.binance.validar_symbol(
+                symbol
+            )
+
+            if normalizado not in resultado:
+                resultado.append(
+                    normalizado
+                )
 
         return resultado
 
@@ -1092,6 +1161,17 @@ class RSIWorker:
 
         Remove duplicados preservando a ordem.
         """
+
+        if self.symbols_configurados:
+
+            logger.info(
+                "Usando símbolos configurados | total=%d",
+                len(self.symbols_configurados),
+            )
+
+            return list(
+                self.symbols_configurados
+            )
 
         logger.info(
             "Obtendo símbolos USDT da Binance..."

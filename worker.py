@@ -7,8 +7,6 @@ import os
 
 from dotenv import load_dotenv
 
-from workers.rsi_worker import rsi_worker
-
 
 # ==========================================================
 # ENV
@@ -44,6 +42,10 @@ logger = logging.getLogger(
 # ==========================================================
 
 def main() -> None:
+
+    # O singleton do worker é criado somente após carregar .env.
+    # Isso permite limitar pares e timeframes sem alterar o código.
+    from workers.rsi_worker import rsi_worker
 
     logger.info(
         "Iniciando RSI Worker."
