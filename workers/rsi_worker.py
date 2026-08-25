@@ -1205,6 +1205,46 @@ class RSIWorker:
     # OBTER TICKERS
     # ==========================================================
 
+    def _aquecer_cache_mercados_binance(
+        self,
+    ) -> None:
+        """Carrega mercados antes do próximo fechamento de candle.
+
+        O CCXT precisa conhecer os mercados antes do primeiro OHLCV. Fazer
+        isso durante a inicialização impede que a primeira leitura de RSI
+        consuma o prazo máximo de um minuto reservado aos alertas Telegram.
+        """
+
+        carregar_mercados = getattr(
+            self.binance,
+            "carregar_mercados",
+            None,
+        )
+        if not callable(carregar_mercados):
+            logger.warning(
+                "BinanceService não oferece aquecimento de mercados."
+            )
+            return
+
+        logger.info("Aquecendo cache de mercados da Binance...")
+        inicio = time.monotonic()
+        try:
+            mercados = carregar_mercados()
+        except Exception as exc:
+            # A falha de warm-up não pode impedir a recuperação do worker.
+            # O serviço mantém o retry normal na primeira consulta de candle.
+            logger.warning(
+                "Não foi possível aquecer mercados da Binance | erro=%s",
+                exc,
+            )
+            return
+
+        logger.info(
+            "Cache de mercados Binance aquecido | total=%d | tempo=%.2fs",
+            len(mercados),
+            time.monotonic() - inicio,
+        )
+
     def _obter_tickers(
         self,
         symbols: list[str],
@@ -2305,8 +2345,10 @@ class RSIWorker:
             self.app = create_app()
 
         # ------------------------------------------------------
-        # Inicializa agenda
+        # Aquece mercados e inicializa agenda
         # ------------------------------------------------------
+
+        self._aquecer_cache_mercados_binance()
 
         self._inicializar_agenda()
 

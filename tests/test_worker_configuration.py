@@ -10,6 +10,7 @@ class FakeBinance:
     def __init__(self) -> None:
         self.get_usdt_symbols_calls = 0
         self.get_tickers_calls: list[list[str] | None] = []
+        self.carregar_mercados_calls = 0
 
     def validar_symbol(self, symbol: str) -> str:
         value = symbol.strip().upper().replace("-", "/")
@@ -22,6 +23,13 @@ class FakeBinance:
     def get_usdt_symbols(self) -> list[str]:
         self.get_usdt_symbols_calls += 1
         return ["BTC/USDT", "ETH/USDT"]
+
+    def carregar_mercados(self) -> dict[str, dict]:
+        self.carregar_mercados_calls += 1
+        return {
+            "BTC/USDT": {},
+            "ETH/USDT": {},
+        }
 
     def get_tickers(self, symbols: list[str] | None = None) -> dict[str, dict]:
         self.get_tickers_calls.append(symbols)
@@ -81,6 +89,15 @@ def test_worker_requests_only_configured_tickers(monkeypatch):
 
     assert set(tickers) == {"BTC/USDT", "ETH/USDT"}
     assert binance.get_tickers_calls == [["BTC/USDT", "ETH/USDT"]]
+
+
+def test_worker_warms_binance_markets_before_processing():
+    binance = FakeBinance()
+    worker = build_worker(binance)
+
+    worker._aquecer_cache_mercados_binance()
+
+    assert binance.carregar_mercados_calls == 1
 
 
 def test_worker_keeps_complete_ticker_request_without_symbol_configuration(monkeypatch):
