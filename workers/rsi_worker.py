@@ -1207,17 +1207,25 @@ class RSIWorker:
 
     def _obter_tickers(
         self,
+        symbols: list[str],
     ) -> dict[str, dict[str, Any]]:
         """
-        Obtém todos os tickers da Binance uma única vez.
+        Obtém os tickers necessários para o ciclo uma única vez.
+
+        No modo com símbolos configurados, pede somente esses tickers para
+        evitar que uma VM pequena mantenha em memória todos os pares da
+        Binance. Sem essa configuração, preserva a busca completa atual.
         """
 
         logger.info(
-            "Obtendo tickers da Binance..."
+            "Obtendo tickers da Binance | symbols=%s",
+            len(symbols) if self.symbols_configurados else "todos",
         )
 
         tickers = (
-            self.binance.get_tickers()
+            self.binance.get_tickers(
+                symbols=symbols if self.symbols_configurados else None
+            )
         )
 
         if not tickers:
@@ -1833,7 +1841,7 @@ class RSIWorker:
         try:
 
             tickers = (
-                self._obter_tickers()
+                self._obter_tickers(symbols)
             )
 
         except Exception as exc:

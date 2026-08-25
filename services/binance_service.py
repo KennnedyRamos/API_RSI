@@ -892,20 +892,36 @@ class BinanceService:
 
     def get_tickers(
         self,
+        symbols: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """
-        Obtém todos os tickers da Binance em uma única chamada.
+        Obtém os tickers da Binance em uma única chamada.
 
-        Isso é importante para o RSIWorker, pois evita uma
-        chamada HTTP para cada símbolo.
+        Quando ``symbols`` é informado, pede somente esses pares à exchange.
+        Isso evita carregar milhares de tickers quando o worker está operando
+        em modo reduzido numa VM pequena.
         """
+
+        selected_symbols: list[str] | None = None
+        if symbols:
+            selected_symbols = list(
+                dict.fromkeys(
+                    self.validar_symbol(symbol)
+                    for symbol in symbols
+                )
+            )
 
         try:
 
             tickers = (
                 self._executar_com_retry(
                     self.exchange.fetch_tickers,
-                    operacao="fetch_tickers",
+                    operacao=(
+                        "fetch_tickers selecionados"
+                        if selected_symbols
+                        else "fetch_tickers"
+                    ),
+                    **({"symbols": selected_symbols} if selected_symbols else {}),
                 )
             )
 
@@ -916,8 +932,9 @@ class BinanceService:
                 )
 
             logger.info(
-                "Tickers Binance obtidos | total=%d",
+                "Tickers Binance obtidos | total=%d | selecionados=%s",
                 len(tickers),
+                len(selected_symbols) if selected_symbols else "todos",
             )
 
             return tickers

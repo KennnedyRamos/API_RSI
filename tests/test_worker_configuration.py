@@ -8,6 +8,7 @@ from workers.rsi_worker import RSIWorker
 class FakeBinance:
     def __init__(self) -> None:
         self.get_usdt_symbols_calls = 0
+        self.get_tickers_calls: list[list[str] | None] = []
 
     def validar_symbol(self, symbol: str) -> str:
         value = symbol.strip().upper().replace("-", "/")
@@ -20,6 +21,10 @@ class FakeBinance:
     def get_usdt_symbols(self) -> list[str]:
         self.get_usdt_symbols_calls += 1
         return ["BTC/USDT", "ETH/USDT"]
+
+    def get_tickers(self, symbols: list[str] | None = None) -> dict[str, dict]:
+        self.get_tickers_calls.append(symbols)
+        return {symbol: {} for symbol in (symbols or ["BTC/USDT", "ETH/USDT"])}
 
 
 def build_worker(binance: FakeBinance) -> RSIWorker:
@@ -62,3 +67,26 @@ def test_worker_defaults_to_all_usdt_symbols_without_configuration(monkeypatch):
     assert worker.symbols_configurados == []
     assert worker._obter_symbols() == ["BTC/USDT", "ETH/USDT"]
     assert binance.get_usdt_symbols_calls == 1
+
+
+def test_worker_requests_only_configured_tickers(monkeypatch):
+    monkeypatch.setenv("RSI_WORKER_SYMBOLS", "BTCUSDT, ETHUSDT")
+    binance = FakeBinance()
+
+    worker = build_worker(binance)
+    symbols = worker._obter_symbols()
+
+    tickers = worker._obter_tickers(symbols)
+
+    assert set(tickers) == {"BTC/USDT", "ETH/USDT"}
+    assert binance.get_tickers_calls == [["BTC/USDT", "ETH/USDT"]]
+
+
+def test_worker_keeps_complete_ticker_request_without_symbol_configuration(monkeypatch):
+    monkeypatch.delenv("RSI_WORKER_SYMBOLS", raising=False)
+    binance = FakeBinance()
+
+    worker = build_worker(binance)
+    worker._obter_tickers(["BTC/USDT", "ETH/USDT"])
+
+    assert binance.get_tickers_calls == [None]
