@@ -8,6 +8,8 @@ Always Free com **1 OCPU e 6 GB de RAM**.
 > Ela é insuficiente para a coleta contínua de todos os pares e timeframes.
 > Em caso de espera por capacidade A1, há um modo temporário reduzido em
 > [ORACLE_E2_MICRO_TEMPORARY.md](ORACLE_E2_MICRO_TEMPORARY.md).
+> Após autorização explícita, o retry local de criação está documentado em
+> [ORACLE_A1_PROVISION_RETRY.md](ORACLE_A1_PROVISION_RETRY.md).
 
 O worker já é contínuo. Não inicie `workers/scheduler.py` junto com
 `worker.py`, pois isso duplicaria o processamento.

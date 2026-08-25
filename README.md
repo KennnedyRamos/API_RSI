@@ -77,6 +77,9 @@ Free para API, worker e PostgreSQL, com o Render reservado ao futuro frontend
 estático. Consulte o [guia de deploy na Oracle](deploy/ORACLE_ALWAYS_FREE.md).
 Enquanto a A1 de 6 GB não tiver capacidade, há também um
 [modo temporário para a E2 Micro de 1 GB](deploy/ORACLE_E2_MICRO_TEMPORARY.md).
+Com autorização explícita, use o
+[retry automático de criação da A1](deploy/ORACLE_A1_PROVISION_RETRY.md) para
+tentar provisioná-la periodicamente sem migrar a conta para Pay As You Go.
 
 ## Configurar o Telegram
 
