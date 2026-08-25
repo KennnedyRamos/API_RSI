@@ -1,102 +1,169 @@
-# Deploy na Oracle Cloud Always Free
+# Deploy manual na Oracle Cloud Always Free
 
-Este projeto usa uma única VM Oracle para a API Flask, o worker RSI e o
-PostgreSQL. O worker já é contínuo e roda em um container próprio. Não inicie
-também `workers/scheduler.py`, pois isso duplicaria o processamento.
+Este projeto executa API Flask, worker RSI e PostgreSQL em uma única VM
+Oracle. A configuração indicada para produção é a **VM.Standard.A1.Flex**
+Always Free com **1 OCPU e 6 GB de RAM**.
 
-O Render ficará reservado para o frontend estático. Antes dessa etapa, a API
-precisa de uma URL HTTPS: um site HTTPS do Render não pode consultar uma API
-HTTP.
+> Não use a E2 Micro de 1 GB para API + worker + banco. Ela é insuficiente
+> para a coleta contínua de todos os pares e timeframes.
+
+O worker já é contínuo. Não inicie `workers/scheduler.py` junto com
+`worker.py`, pois isso duplicaria o processamento.
 
 ## 1. Criar a VM
 
-Na Oracle Cloud, crie uma instância **Always Free** com Ubuntu 24.04 e shape
-**VM.Standard.A1.Flex**. Comece com **1 OCPU e 6 GB de RAM**. Não selecione
-load balancer, banco gerenciado nem outro recurso pago. Consulte os
-[limites oficiais Always Free](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
-antes de criar a instância.
+No Console Oracle, selecione:
 
-Na Network Security Group (ou Security List), permita apenas:
+- Shape: `VM.Standard.A1.Flex`;
+- Recursos: 1 OCPU e 6 GB de RAM;
+- Imagem: Ubuntu 24.04 **ou** Oracle Linux 9;
+- Rede: a VCN e a subnet pública existentes podem ser reutilizadas;
+- Endereço IP público: habilitado.
+
+Não escolha load balancer, banco gerenciado ou qualquer recurso pago. A
+escolha de disco padrão da imagem é suficiente para iniciar o projeto;
+o volume PostgreSQL fica persistido no Docker da própria VM.
+
+Na Security List ou NSG da Oracle, permita somente:
 
 | Porta | Origem | Uso |
 | --- | --- | --- |
-| 22/TCP | seu IP público | SSH |
-| 80/TCP | `0.0.0.0/0` | certificado HTTPS |
+| 22/TCP | Seu IP público | SSH |
+| 80/TCP | `0.0.0.0/0` | Emissão e renovação do certificado HTTPS |
 | 443/TCP | `0.0.0.0/0` | API e painel |
 
-Não abra `5432`, `5000` nem `8000`. Depois de confirmar o SSH, replique as
-regras no firewall UFW do Ubuntu.
+Não exponha as portas `5432`, `5000` ou `8000`.
 
-## 2. Configurar HTTPS sem custo
+## 2. Configurar um domínio HTTPS gratuito
 
-Use um domínio seu ou um subdomínio gratuito, por exemplo DuckDNS. Aponte o
-registro DNS para o IP público da VM e confirme a propagação:
+Use um domínio seu ou um subdomínio gratuito, como DuckDNS. Crie um registro
+`A` apontando para o IP público da VM. O nome escolhido será usado em
+`CADDY_DOMAIN`.
+
+Antes de publicar os containers, confirme a resolução:
 
 ```bash
 nslookup api-seu-rsi.duckdns.org
 ```
 
-O nome deve ser exatamente o valor de `CADDY_DOMAIN`. O Caddy obterá e
-renovará automaticamente o certificado TLS quando o DNS e as portas 80/443
-estiverem corretos.
+O Caddy obtém e renova o certificado TLS automaticamente quando o DNS aponta
+para a VM e as portas 80/443 estão liberadas.
 
-## 3. Instalar Docker na VM
+## 3. Conectar e preparar o sistema operacional
 
-Conecte-se com a chave SSH criada no provisionamento:
+O usuário SSH depende da imagem escolhida:
 
 ```bash
+# Ubuntu 24.04
 ssh ubuntu@IP_PUBLICO_DA_VM
+
+# Oracle Linux 9
+ssh opc@IP_PUBLICO_DA_VM
 ```
 
-Instale Docker Engine e o plugin Docker Compose seguindo a
-[documentação oficial para Ubuntu](https://docs.docker.com/engine/install/ubuntu/).
-Depois, permita que o usuário `ubuntu` use Docker e conecte-se de novo:
+Instale Docker Engine e o plugin Docker Compose de acordo com a documentação
+oficial da imagem escolhida:
+
+- [Docker no Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
+- [Docker no CentOS / Oracle Linux](https://docs.docker.com/engine/install/centos/)
+
+Depois da instalação, habilite Docker e adicione o usuário da VM ao grupo:
 
 ```bash
+# Use ubuntu na imagem Ubuntu; use opc na imagem Oracle Linux.
+sudo systemctl enable --now docker
 sudo usermod -aG docker ubuntu
+# ou: sudo usermod -aG docker opc
 exit
 ```
 
-Valide a instalação após reconectar:
+Reconecte-se por SSH e valide:
 
 ```bash
+uname -m
 docker --version
 docker compose version
 ```
 
-## 4. Preparar as variáveis de produção
+O resultado de `uname -m` deve ser `aarch64` ou `arm64`.
+
+Também replique as regras de rede no firewall da VM:
+
+```bash
+# Ubuntu
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+
+# Oracle Linux
+sudo firewall-cmd --permanent --add-service=ssh
+sudo firewall-cmd --permanent --add-service=http
+sudo firewall-cmd --permanent --add-service=https
+sudo firewall-cmd --reload
+```
+
+## 4. Baixar o projeto e criar o ambiente de produção
 
 ```bash
 git clone https://github.com/KennnedyRamos/API_RSI.git
 cd API_RSI
 cp deploy/.env.production.example deploy/.env.production
 chmod 600 deploy/.env.production
+```
+
+Edite somente `deploy/.env.production` na VM:
+
+```bash
+nano deploy/.env.production
+```
+
+Preencha obrigatoriamente:
+
+- `POSTGRES_PASSWORD`: gere uma senha hexadecimal segura;
+- `DATABASE_URL`: use a **mesma** senha e mantenha o host interno `db:5432`;
+- `CADDY_DOMAIN`: seu domínio já apontado para a VM;
+- `CADDY_EMAIL`: seu e-mail real para o certificado TLS.
+
+Gere uma senha segura assim:
+
+```bash
 openssl rand -hex 24
 ```
 
-Edite `deploy/.env.production` com `nano`. Use a senha hexadecimal gerada em
-`POSTGRES_PASSWORD` e também em `DATABASE_URL`; informe o domínio, o e-mail e
-as variáveis reais do Telegram. Copie os valores manualmente, nunca envie seu
-`.env` de desenvolvimento para a VM.
+Deixe `TELEGRAM_ENABLED=false` até configurar um token seguro e o chat de
+destino. Nunca copie o `.env` de desenvolvimento nem envie o arquivo de
+produção ao GitHub.
 
-Confirme que o arquivo seguro não será versionado:
+## 5. Validar antes de iniciar
+
+O pré-check não cria nem remove recursos. Ele valida arquitetura ARM64,
+Docker, Compose e campos obrigatórios do ambiente:
 
 ```bash
-git status --short deploy/.env.production
+bash deploy/preflight_oracle_a1.sh deploy/.env.production
 ```
 
-O comando não deve mostrar saída.
+O resultado esperado é:
 
-## 5. Publicar e validar
+```text
+OK: VM ARM64, Docker Compose e configuração de produção validados.
+```
+
+Se o script avisar sobre DNS, corrija o registro `A` antes de iniciar Caddy.
+
+## 6. Publicar e validar
 
 ```bash
 docker compose --env-file deploy/.env.production up -d --build
 docker compose --env-file deploy/.env.production ps
-docker compose --env-file deploy/.env.production logs --tail=100 api worker
+docker compose --env-file deploy/.env.production logs --tail=100 migrate api worker caddy
 ```
 
-O serviço `migrate` aplica o `flask db upgrade` uma vez; API e worker só
-iniciam depois disso. Valide externamente:
+O serviço `migrate` executa `flask db upgrade` uma vez. API e worker só
+iniciam quando o banco estiver saudável e a migration concluir.
+
+Valide externamente:
 
 ```bash
 curl https://api-seu-rsi.duckdns.org/api/v1/health
@@ -109,7 +176,7 @@ O painel provisório estará em:
 https://api-seu-rsi.duckdns.org/dashboard
 ```
 
-## Operação e backup
+## Operação, atualização e backup
 
 Ver logs:
 
@@ -118,17 +185,18 @@ docker compose --env-file deploy/.env.production logs -f worker
 docker compose --env-file deploy/.env.production logs -f api
 ```
 
-Antes de atualizar migrations, faça um backup:
+Antes de migrations ou atualizações, faça um backup:
 
 ```bash
 mkdir -p backups
 docker compose --env-file deploy/.env.production exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backups/rsi-$(date +%F-%H%M%S).sql
 ```
 
-Atualize o código com:
+Atualize de forma segura:
 
 ```bash
 git pull --ff-only
+bash deploy/preflight_oracle_a1.sh deploy/.env.production
 docker compose --env-file deploy/.env.production up -d --build
 ```
 
@@ -138,17 +206,18 @@ Para parar sem apagar o banco:
 docker compose --env-file deploy/.env.production down
 ```
 
-Nunca use `down -v` em produção: esse comando remove o volume PostgreSQL.
+Nunca use `docker compose down -v` em produção: ele remove o volume
+PostgreSQL.
 
 ## Futuro frontend no Render
 
-Quando a interface independente estiver pronta, crie no Render um **Static
-Site** ligado ao GitHub. Depois, coloque a URL HTTPS exata dele em
-`CORS_ALLOWED_ORIGINS` na VM e rode:
+Quando a interface independente estiver pronta, crie no Render um Static Site
+ligado ao GitHub. Depois, coloque a URL HTTPS exata dele em
+`CORS_ALLOWED_ORIGINS` na VM e execute:
 
 ```bash
 docker compose --env-file deploy/.env.production up -d
 ```
 
-Se o novo frontend mantiver a rota `/dashboard`, atualize também
-`DASHBOARD_PUBLIC_URL` para ele. Nunca use `CORS_ALLOWED_ORIGINS=*`.
+Se o frontend substituir o painel provisório, atualize também
+`DASHBOARD_PUBLIC_URL`. Nunca use `CORS_ALLOWED_ORIGINS=*`.
