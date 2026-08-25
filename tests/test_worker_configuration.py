@@ -93,14 +93,91 @@ def test_worker_keeps_complete_ticker_request_without_symbol_configuration(monke
     assert binance.get_tickers_calls == [None]
 
 
-def test_selected_tickers_are_fetched_individually():
+def test_binance_exchange_fetches_only_spot_markets(monkeypatch):
+    configurations: list[dict] = []
+
+    class FakeExchange:
+        def __init__(self, configuration: dict) -> None:
+            configurations.append(configuration)
+
+    monkeypatch.setattr(
+        "services.binance_service.ccxt.binance",
+        FakeExchange,
+    )
+    service = BinanceService()
+
+    try:
+        assert configurations[0]["options"]["fetchMarkets"] == {
+            "types": ["spot"],
+        }
+    finally:
+        service.close()
+
+
+def test_selected_tickers_use_reduced_public_batch():
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return [
+                {
+                    "symbol": "BTCUSDT",
+                    "lastPrice": "104250.25",
+                    "priceChangePercent": "3.82",
+                    "quoteVolume": "42310000000",
+                    "volume": "405850",
+                    "closeTime": 1_777_000_000_000,
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "lastPrice": "3210.50",
+                    "priceChangePercent": "-1.25",
+                    "quoteVolume": "12000000000",
+                    "volume": "3700000",
+                    "closeTime": 1_777_000_000_000,
+                },
+            ]
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict, float]] = []
+
+        def get(
+            self,
+            url: str,
+            *,
+            params: dict,
+            timeout: float,
+        ) -> FakeResponse:
+            self.calls.append((url, params, timeout))
+            return FakeResponse()
+
     service = object.__new__(BinanceService)
-    calls: list[str] = []
+    session = FakeSession()
 
     service.validar_symbol = FakeBinance().validar_symbol
-    service.get_ticker = lambda symbol: calls.append(symbol) or {"symbol": symbol}
+    service._ticker_session = session
+    service._executar_com_retry = (
+        lambda func, *, operacao, **kwargs: func(**kwargs)
+    )
 
     tickers = service.get_tickers(["BTCUSDT", "ETH/USDT", "BTC-USDT"])
 
     assert set(tickers) == {"BTC/USDT", "ETH/USDT"}
-    assert calls == ["BTC/USDT", "ETH/USDT"]
+    assert tickers["BTC/USDT"] == {
+        "symbol": "BTC/USDT",
+        "last": "104250.25",
+        "close": "104250.25",
+        "percentage": "3.82",
+        "quoteVolume": "42310000000",
+        "baseVolume": "405850",
+        "timestamp": 1_777_000_000_000,
+    }
+    assert session.calls == [
+        (
+            BinanceService.TICKERS_24H_URL,
+            {"symbols": '["BTCUSDT","ETHUSDT"]'},
+            BinanceService.TICKERS_REQUEST_TIMEOUT,
+        )
+    ]

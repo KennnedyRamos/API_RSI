@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Optional
 
 import ccxt
+import requests
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,20 @@ class BinanceService:
     # ----------------------------------------------------------
 
     DEFAULT_MARKETS_CACHE_TTL = 900
+
+    # ----------------------------------------------------------
+    # TICKERS SELECIONADOS
+    # ----------------------------------------------------------
+
+    # A rota pública aceita uma lista de pares e, diferente do
+    # ``fetch_ticker`` do CCXT, não precisa carregar o catálogo completo da
+    # Binance antes da primeira consulta. Isso é essencial nas VMs pequenas.
+    TICKERS_24H_URL = "https://api.binance.com/api/v3/ticker/24hr"
+
+    # Um ciclo que excede um minuto não pode gerar alertas Telegram. Mantemos
+    # um timeout curto para falhar cedo e nunca transformar uma indisponibilidade
+    # temporária da Binance em alerta atrasado.
+    TICKERS_REQUEST_TIMEOUT = 8.0
 
     # ==========================================================
     # INIT
@@ -138,6 +154,10 @@ class BinanceService:
 
         self._markets_timestamp = 0.0
 
+        # A sessão é reutilizada entre ciclos para manter a conexão HTTPS e
+        # reduzir a latência das consultas reduzidas de ticker.
+        self._ticker_session = requests.Session()
+
         # ------------------------------------------------------
         # EXCHANGE
         # ------------------------------------------------------
@@ -177,6 +197,12 @@ class BinanceService:
                     "enableRateLimit": True,
                     "options": {
                         "defaultType": "spot",
+                        # CCXT tenta carregar spot, futuros lineares e
+                        # futuros inversos por padrão. O RSI deste projeto
+                        # usa somente pares spot/USDT.
+                        "fetchMarkets": {
+                            "types": ["spot"],
+                        },
                     },
                 }
             )
@@ -214,6 +240,7 @@ class BinanceService:
                 ccxt.RequestTimeout,
                 ccxt.ExchangeNotAvailable,
                 ccxt.RateLimitExceeded,
+                requests.RequestException,
             ),
         )
 
@@ -890,6 +917,85 @@ class BinanceService:
     # TODOS OS TICKERS
     # ==========================================================
 
+    def _buscar_tickers_selecionados_publicos(
+        self,
+        symbols: list[str],
+    ) -> list[dict[str, Any]]:
+        """Busca somente os tickers solicitados na API pública da Binance."""
+
+        response = self._ticker_session.get(
+            self.TICKERS_24H_URL,
+            params={
+                "symbols": json.dumps(
+                    symbols,
+                    separators=(",", ":"),
+                ),
+            },
+            timeout=self.TICKERS_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise TypeError(
+                "A Binance retornou um formato inválido de tickers."
+            )
+
+        return payload
+
+    def _obter_tickers_selecionados(
+        self,
+        symbols: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Converte a resposta pública reduzida ao formato usado pelo RSI."""
+
+        compactos = {
+            symbol.replace("/", ""): symbol
+            for symbol in symbols
+        }
+        payload = self._executar_com_retry(
+            self._buscar_tickers_selecionados_publicos,
+            operacao="ticker_24h de pares selecionados",
+            symbols=list(compactos),
+        )
+
+        tickers: dict[str, dict[str, Any]] = {}
+        for ticker in payload:
+            if not isinstance(ticker, dict):
+                continue
+
+            compacto = str(ticker.get("symbol") or "").upper()
+            symbol = compactos.get(compacto)
+            if symbol is None:
+                continue
+
+            tickers[symbol] = {
+                "symbol": symbol,
+                "last": ticker.get("lastPrice"),
+                "close": ticker.get("lastPrice"),
+                "percentage": ticker.get("priceChangePercent"),
+                "quoteVolume": ticker.get("quoteVolume"),
+                "baseVolume": ticker.get("volume"),
+                "timestamp": ticker.get("closeTime"),
+            }
+
+        ausentes = [
+            symbol
+            for symbol in symbols
+            if symbol not in tickers
+        ]
+        if ausentes:
+            raise ValueError(
+                "A Binance não retornou ticker para: "
+                f"{', '.join(ausentes)}."
+            )
+
+        logger.info(
+            "Tickers Binance obtidos em lote público | total=%d",
+            len(tickers),
+        )
+        return tickers
+
     def get_tickers(
         self,
         symbols: list[str] | None = None,
@@ -897,9 +1003,9 @@ class BinanceService:
         """
         Obtém os tickers da Binance.
 
-        Quando ``symbols`` é informado, consulta cada par separadamente. Isso
-        evita que a resposta em lote da Binance carregue milhares de tickers
-        numa VM pequena.
+        Quando ``symbols`` é informado, consulta somente esses pares em um
+        lote público reduzido. Isso evita o catálogo completo da Binance e
+        mantém o ciclo suficientemente rápido para alertas recentes.
         """
 
         selected_symbols: list[str] | None = None
@@ -912,15 +1018,9 @@ class BinanceService:
             )
 
         if selected_symbols:
-            tickers = {
-                symbol: self.get_ticker(symbol)
-                for symbol in selected_symbols
-            }
-            logger.info(
-                "Tickers Binance obtidos individualmente | total=%d",
-                len(tickers),
+            return self._obter_tickers_selecionados(
+                selected_symbols
             )
-            return tickers
 
         try:
 
@@ -993,6 +1093,19 @@ class BinanceService:
             ):
 
                 close_method()
+
+            ticker_session = getattr(
+                self,
+                "_ticker_session",
+                None,
+            )
+            session_close = getattr(
+                ticker_session,
+                "close",
+                None,
+            )
+            if callable(session_close):
+                session_close()
 
             logger.info(
                 "Conexão Binance encerrada."
