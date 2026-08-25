@@ -6,7 +6,7 @@ import signal
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from app import create_app
 
@@ -1215,6 +1215,13 @@ class RSIWorker:
         consuma o prazo máximo de um minuto reservado aos alertas Telegram.
         """
 
+        if self.symbols_configurados:
+            logger.info(
+                "Aquecimento de mercados ignorado | "
+                "símbolos configurados usam API pública direta."
+            )
+            return
+
         carregar_mercados = getattr(
             self.binance,
             "carregar_mercados",
@@ -1346,6 +1353,9 @@ class RSIWorker:
         intervalo: str,
         symbols: list[str],
         tickers: dict[str, dict[str, Any]],
+        on_result_completed: (
+            Callable[[dict[str, Any]], None] | None
+        ) = None,
     ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
@@ -1375,6 +1385,7 @@ class RSIWorker:
                 symbols=symbols,
                 tickers=tickers,
                 salvar=True,
+                on_result_completed=on_result_completed,
             )
         )
 
@@ -1441,6 +1452,9 @@ class RSIWorker:
         intervalo: str,
         symbols: list[str],
         tickers: dict[str, dict[str, Any]],
+        on_result_completed: (
+            Callable[[dict[str, Any]], None] | None
+        ) = None,
     ) -> dict[str, Any]:
         """
         Processa um timeframe com retry controlado.
@@ -1471,6 +1485,7 @@ class RSIWorker:
                         intervalo=intervalo,
                         symbols=symbols,
                         tickers=tickers,
+                        on_result_completed=on_result_completed,
                     )
                 )
 
@@ -1567,6 +1582,12 @@ class RSIWorker:
         intervalos: list[str],
         symbols: list[str],
         tickers: dict[str, dict[str, Any]],
+        on_result_completed: (
+            Callable[[dict[str, Any]], None] | None
+        ) = None,
+        on_timeframe_completed: (
+            Callable[[list[dict[str, Any]]], None] | None
+        ) = None,
     ) -> tuple[
         list[dict[str, Any]],
         list[dict[str, Any]],
@@ -1619,6 +1640,7 @@ class RSIWorker:
                         intervalo=intervalo,
                         symbols=symbols,
                         tickers=tickers,
+                        on_result_completed=on_result_completed,
                     )
                 )
 
@@ -1629,6 +1651,21 @@ class RSIWorker:
                 erros.extend(
                     resultado["errors"]
                 )
+
+                if (
+                    on_timeframe_completed is not None
+                    and resultado["results"]
+                ):
+                    try:
+                        on_timeframe_completed(
+                            resultado["results"]
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Falha no processamento imediato de alertas | "
+                            "timeframe=%s",
+                            intervalo,
+                        )
 
                 # ------------------------------------------------
                 # Agenda o próximo candle independentemente de
@@ -1668,6 +1705,10 @@ class RSIWorker:
                     intervalo,
                     symbols,
                     tickers,
+                    # Alertas e commits da outbox são executados somente na
+                    # thread principal. No modo paralelo o callback ocorre
+                    # após o timeframe inteiro, no laço ``as_completed``.
+                    None,
                 ): intervalo
                 for intervalo in intervalos
                 if self.running
@@ -1692,6 +1733,21 @@ class RSIWorker:
                     erros.extend(
                         resultado["errors"]
                     )
+
+                    if (
+                        on_timeframe_completed is not None
+                        and resultado["results"]
+                    ):
+                        try:
+                            on_timeframe_completed(
+                                resultado["results"]
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Falha no processamento imediato de alertas | "
+                                "timeframe=%s",
+                                intervalo,
+                            )
 
                 except Exception as exc:
 
@@ -1720,6 +1776,103 @@ class RSIWorker:
             resultados,
             erros,
         )
+
+    # ==========================================================
+    # ALERTAS IMEDIATOS
+    # ==========================================================
+
+    @staticmethod
+    def _acumular_metricas_alertas(
+        acumulado: dict[str, int],
+        atual: dict[str, int],
+    ) -> None:
+        """Soma métricas de vários timeframes no resumo do ciclo."""
+
+        for chave, valor in atual.items():
+            if not isinstance(valor, int):
+                continue
+
+            if chave == "skipped":
+                acumulado[chave] = max(
+                    acumulado.get(chave, 0),
+                    valor,
+                )
+                continue
+
+            acumulado[chave] = acumulado.get(chave, 0) + valor
+
+    def _registrar_e_despachar_alertas(
+        self,
+        resultados: list[dict[str, Any]],
+        *,
+        rsi_por_symbol: dict[str, dict[str, float | None]],
+        limite_despacho: int,
+    ) -> tuple[dict[str, int], int]:
+        """Cria e envia alertas logo após a persistência de um símbolo.
+
+        Retorna as métricas e a quantidade de tentativas de envio consumidas
+        para que o worker respeite um único limite no ciclo inteiro.
+        """
+
+        alertas = {
+            "events_created": 0,
+            "deliveries_created": 0,
+            "sent": 0,
+            "retried": 0,
+            "expired": 0,
+            "skipped": 0,
+        }
+        if not resultados:
+            return alertas, 0
+
+        try:
+            registrar_imediato = getattr(
+                self.alert_service,
+                "registrar_resultados_com_entregas",
+                None,
+            )
+            delivery_ids: list[int] = []
+            if callable(registrar_imediato):
+                metricas_registro, delivery_ids = registrar_imediato(
+                    resultados,
+                    rsi_por_symbol=rsi_por_symbol,
+                )
+            else:
+                metricas_registro = (
+                    self.alert_service.registrar_resultados(resultados)
+                )
+
+            self._acumular_metricas_alertas(
+                alertas,
+                metricas_registro,
+            )
+
+            if limite_despacho > 0 and (
+                delivery_ids or not callable(registrar_imediato)
+            ):
+                kwargs: dict[str, Any] = {
+                    "limite": limite_despacho,
+                }
+                if delivery_ids:
+                    kwargs.update(
+                        {
+                            "delivery_ids": delivery_ids,
+                            "expirar_pendentes": False,
+                        }
+                    )
+
+                metricas_despacho = self.alert_service.despachar_pendentes(
+                    **kwargs,
+                )
+                self._acumular_metricas_alertas(
+                    alertas,
+                    metricas_despacho,
+                )
+        except Exception:
+            logger.exception("Falha no processamento de alertas RSI.")
+
+        consumidas = alertas["sent"] + alertas["retried"]
+        return alertas, consumidas
 
     # ==========================================================
     # PROCESSAR CICLO
@@ -1956,6 +2109,54 @@ class RSIWorker:
         # TIMEFRAMES
         # ======================================================
 
+        alertas = {
+            "events_created": 0,
+            "deliveries_created": 0,
+            "sent": 0,
+            "retried": 0,
+            "expired": 0,
+            "skipped": 0,
+        }
+        rsi_por_symbol: dict[str, dict[str, float | None]] = {}
+        limite_despacho_restante = max(
+            0,
+            int(
+                getattr(
+                    self.alert_service,
+                    "max_dispatch_per_cycle",
+                    0,
+                )
+            ),
+        )
+
+        def processar_alertas_imediatos(
+            resultado_ou_resultados: (
+                dict[str, Any] | list[dict[str, Any]]
+            ),
+        ) -> None:
+            nonlocal limite_despacho_restante
+
+            resultados_alerta = (
+                [resultado_ou_resultados]
+                if isinstance(resultado_ou_resultados, dict)
+                else resultado_ou_resultados
+            )
+            metricas_alerta, despachos_consumidos = (
+                self._registrar_e_despachar_alertas(
+                    resultados_alerta,
+                    rsi_por_symbol=rsi_por_symbol,
+                    limite_despacho=limite_despacho_restante,
+                )
+            )
+            self._acumular_metricas_alertas(
+                alertas,
+                metricas_alerta,
+            )
+            limite_despacho_restante = max(
+                0,
+                limite_despacho_restante - despachos_consumidos,
+            )
+
         (
             resultados,
             erros,
@@ -1963,31 +2164,34 @@ class RSIWorker:
             intervalos=intervalos_vencidos,
             symbols=symbols,
             tickers=tickers,
+            on_result_completed=(
+                processar_alertas_imediatos
+                if self.max_timeframe_workers == 1
+                else None
+            ),
+            on_timeframe_completed=(
+                None
+                if self.max_timeframe_workers == 1
+                else processar_alertas_imediatos
+            ),
         )
 
-        # Eventos e entrega são processados depois que todos os
-        # timeframes terminaram. Isso evita chamadas ao Telegram a partir
-        # das threads de processamento e mantém a entrega sequencial.
-        alertas = {
-            "events_created": 0,
-            "deliveries_created": 0,
-            "sent": 0,
-            "retried": 0,
-        }
-
-        try:
-            alertas.update(
-                self.alert_service.registrar_resultados(
-                    resultados,
+        # Faz uma última tentativa para entregas pendentes de ciclos
+        # anteriores sem exceder o orçamento global de Telegram. Os alertas
+        # novos já foram enviados após cada RSI persistido.
+        if limite_despacho_restante > 0:
+            try:
+                metricas_despacho = self.alert_service.despachar_pendentes(
+                    limite=limite_despacho_restante,
                 )
-            )
-            alertas.update(
-                self.alert_service.despachar_pendentes()
-            )
-        except Exception:
-            logger.exception(
-                "Falha no processamento de alertas RSI.",
-            )
+                self._acumular_metricas_alertas(
+                    alertas,
+                    metricas_despacho,
+                )
+            except Exception:
+                logger.exception(
+                    "Falha no processamento de alertas RSI.",
+                )
 
         # ======================================================
         # RESULTADO FINAL

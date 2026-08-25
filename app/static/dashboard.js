@@ -1,6 +1,8 @@
 (() => {
   "use strict";
 
+  const SIGNALS_REFRESH_MS = 5_000;
+
   const state = {
     intervalo: "1h",
     signalType: "",
@@ -8,6 +10,7 @@
     selectedSymbol: null,
     selectedRecord: null,
     records: [],
+    signalsLoading: false,
     suggestionsTimer: null,
   };
 
@@ -61,6 +64,7 @@
 
   async function request(path) {
     const response = await fetch(path, {
+      cache: "no-store",
       headers: { Accept: "application/json" },
     });
     const data = await response.json().catch(() => ({}));
@@ -150,6 +154,9 @@
   }
 
   async function loadSignals() {
+    if (state.signalsLoading) return;
+    state.signalsLoading = true;
+
     const params = new URLSearchParams({
       intervalo: state.intervalo,
       limite: "100",
@@ -177,6 +184,7 @@
       elements.empty.querySelector("p").textContent = error.message;
     } finally {
       elements.refresh.disabled = false;
+      state.signalsLoading = false;
     }
   }
 
@@ -407,7 +415,7 @@
       setConnection(false, "Falha ao iniciar painel");
       elements.tableStatus.textContent = error.message;
     }
-    window.setInterval(loadSignals, 60_000);
+    window.setInterval(loadSignals, SIGNALS_REFRESH_MS);
   }
 
   initialize();

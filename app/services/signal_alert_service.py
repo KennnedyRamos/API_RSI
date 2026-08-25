@@ -47,11 +47,14 @@ class SignalAlertService:
         self.snapshot_repository = snapshot_repository
         self.rsi_service = rsi_service_instance or rsi_service
         self.telegram = telegram or telegram_service
-        self.max_dispatch_per_cycle = int(
-            os.getenv(
-                "TELEGRAM_MAX_DISPATCH_PER_CYCLE",
-                self.DEFAULT_MAX_DISPATCH_PER_CYCLE,
-            )
+        self.max_dispatch_per_cycle = max(
+            0,
+            int(
+                os.getenv(
+                    "TELEGRAM_MAX_DISPATCH_PER_CYCLE",
+                    self.DEFAULT_MAX_DISPATCH_PER_CYCLE,
+                )
+            ),
         )
         self.max_attempts = int(
             os.getenv(
@@ -75,9 +78,47 @@ class SignalAlertService:
     ) -> dict[str, int]:
         """Registra eventos de entrada e suas entregas pendentes."""
 
+        metricas, _ = self._registrar_resultados(
+            resultados,
+            rsi_por_symbol={},
+        )
+        return metricas
+
+    def registrar_resultados_com_entregas(
+        self,
+        resultados: list[dict[str, Any]],
+        *,
+        rsi_por_symbol: dict[
+            str,
+            dict[str, float | None],
+        ],
+    ) -> tuple[dict[str, int], list[int]]:
+        """Registra alertas e retorna apenas as entregas recém-criadas.
+
+        O cache é compartilhado pelo ciclo do worker. Assim, se um mesmo
+        par gerar mais de um alerta, os RSI complementares são consultados na
+        Binance no máximo uma vez durante esse ciclo.
+        """
+
+        return self._registrar_resultados(
+            resultados,
+            rsi_por_symbol=rsi_por_symbol,
+        )
+
+    def _registrar_resultados(
+        self,
+        resultados: list[dict[str, Any]],
+        *,
+        rsi_por_symbol: dict[
+            str,
+            dict[str, float | None],
+        ],
+    ) -> tuple[dict[str, int], list[int]]:
+        """Implementação compartilhada do registro idempotente de alertas."""
+
         eventos_criados = 0
         entregas_criadas = 0
-        rsi_por_symbol: dict[str, dict[str, float | None]] = {}
+        delivery_ids: list[int] = []
 
         for resultado in resultados:
             event_type = self.determinar_evento(resultado)
@@ -125,10 +166,15 @@ class SignalAlertService:
                     symbol,
                 )
 
+            self._atualizar_rsi_no_resumo(
+                rsi_por_symbol[symbol],
+                resultado,
+            )
+
             payload = self._criar_payload(
                 resultado,
                 event_type=event_type,
-                rsi_por_intervalo=rsi_por_symbol[symbol],
+                rsi_por_intervalo=dict(rsi_por_symbol[symbol]),
                 candle_closed_at=evento.candle_closed_at,
             )
             dedup_key = self._dedup_key(
@@ -137,7 +183,7 @@ class SignalAlertService:
             )
 
             try:
-                _, entrega_criada = (
+                entrega, entrega_criada = (
                     self.delivery_repository.criar_ou_buscar(
                         signal_event_id=evento.id,
                         destination=self.telegram.chat_id,
@@ -156,14 +202,29 @@ class SignalAlertService:
 
             if entrega_criada:
                 entregas_criadas += 1
+                delivery_ids.append(int(entrega.id))
 
-        return {
-            "events_created": eventos_criados,
-            "deliveries_created": entregas_criadas,
-        }
+        return (
+            {
+                "events_created": eventos_criados,
+                "deliveries_created": entregas_criadas,
+            },
+            delivery_ids,
+        )
 
-    def despachar_pendentes(self) -> dict[str, int]:
-        """Envia uma quantidade limitada da outbox de maneira sequencial."""
+    def despachar_pendentes(
+        self,
+        *,
+        limite: int | None = None,
+        delivery_ids: list[int] | None = None,
+        expirar_pendentes: bool = True,
+    ) -> dict[str, int]:
+        """Envia uma quantidade limitada da outbox de maneira sequencial.
+
+        ``delivery_ids`` permite que o worker priorize as entregas recém
+        criadas pelo símbolo que acabou de ser calculado, sem furar o limite
+        global de mensagens do ciclo.
+        """
 
         if not self.telegram.configurado:
             return {
@@ -173,15 +234,45 @@ class SignalAlertService:
                 "skipped": 1,
             }
 
+        try:
+            limite_solicitado = (
+                self.max_dispatch_per_cycle
+                if limite is None
+                else int(limite)
+            )
+        except (TypeError, ValueError):
+            limite_solicitado = 0
+
+        limite_efetivo = min(
+            self.max_dispatch_per_cycle,
+            max(0, limite_solicitado),
+        )
+        expiradas = (
+            self.delivery_repository.expirar_anteriores_a(
+                cutoff=self._freshness_cutoff(),
+            )
+            if expirar_pendentes
+            else 0
+        )
+        if limite_efetivo == 0:
+            return {
+                "sent": 0,
+                "retried": 0,
+                "expired": expiradas,
+                "skipped": 0,
+            }
+
         enviadas = 0
         reagendadas = 0
-        expiradas = self.delivery_repository.expirar_anteriores_a(
-            cutoff=self._freshness_cutoff(),
-        )
-
-        entregas = self.delivery_repository.buscar_pendentes(
-            limite=self.max_dispatch_per_cycle,
-        )
+        if delivery_ids is None:
+            entregas = self.delivery_repository.buscar_pendentes(
+                limite=limite_efetivo,
+            )
+        else:
+            entregas = self.delivery_repository.buscar_pendentes_por_ids(
+                delivery_ids=delivery_ids,
+                limite=limite_efetivo,
+            )
         rsi_por_symbol: dict[str, dict[str, float | None]] = {}
 
         for entrega in entregas:
@@ -352,6 +443,22 @@ class SignalAlertService:
     def _entrega_esta_recente(self, entrega: Any) -> bool:
         candle_closed_at = self._payload_candle_closed_at(entrega.payload)
         return self._esta_recente(candle_closed_at or entrega.created_at)
+
+    @staticmethod
+    def _atualizar_rsi_no_resumo(
+        resumo: dict[str, float | None],
+        resultado: dict[str, Any],
+    ) -> None:
+        """Mantém no cache o RSI que acabou de ser persistido."""
+
+        intervalo = str(resultado.get("intervalo", ""))
+        if intervalo not in RSI_TIMEFRAMES:
+            return
+
+        try:
+            resumo[intervalo] = float(resultado["rsi"])
+        except (KeyError, TypeError, ValueError):
+            return
 
     def _obter_rsi_por_intervalo(
         self,

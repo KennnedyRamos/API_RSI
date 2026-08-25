@@ -26,6 +26,14 @@ def test_alerts_only_trigger_on_zone_entry():
     ) == "ENTER_OVERSOLD"
 
 
+def test_alert_service_normalizes_negative_dispatch_limit(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_MAX_DISPATCH_PER_CYCLE", "-3")
+
+    service = SignalAlertService(telegram=TelegramService(enabled=False))
+
+    assert service.max_dispatch_per_cycle == 0
+
+
 def test_telegram_message_uses_pt_br_formatting():
     telegram = TelegramService(
         enabled=False,
@@ -214,6 +222,105 @@ def test_alert_service_enriches_incomplete_pending_payload():
     assert rsi_service_fake.calls == [
         ("DUSK/USDT", RSI_TIMEFRAMES),
     ]
+
+
+def test_alert_service_reuses_rsi_cache_for_alerts_from_same_symbol():
+    class SnapshotRepositoryFake:
+        @staticmethod
+        def buscar_rsi_atuais(*, symbol, intervalos):
+            assert symbol == "BTC/USDT"
+            assert tuple(intervalos) == RSI_TIMEFRAMES
+            return {}
+
+    class RSIServiceFake:
+        def __init__(self):
+            self.calls = []
+
+        def obter_rsi_atuais(self, *, symbol, intervalos):
+            self.calls.append((symbol, tuple(intervalos)))
+            return {
+                intervalo: 40.0 + indice
+                for indice, intervalo in enumerate(intervalos)
+            }
+
+    class EventRepositoryFake:
+        next_id = 1
+
+        @classmethod
+        def criar_ou_buscar(cls, **kwargs):
+            evento = type(
+                "Evento",
+                (),
+                {
+                    "id": cls.next_id,
+                    "candle_closed_at": kwargs["candle_closed_at"],
+                },
+            )()
+            cls.next_id += 1
+            return evento, True
+
+    class DeliveryRepositoryFake:
+        next_id = 1
+        payloads = []
+
+        @classmethod
+        def criar_ou_buscar(cls, **kwargs):
+            entrega = type("Entrega", (), {"id": cls.next_id})()
+            cls.next_id += 1
+            cls.payloads.append(kwargs["payload"])
+            return entrega, True
+
+    rsi_service_fake = RSIServiceFake()
+    service = SignalAlertService(
+        event_repository=EventRepositoryFake,
+        delivery_repository=DeliveryRepositoryFake,
+        snapshot_repository=SnapshotRepositoryFake,
+        rsi_service_instance=rsi_service_fake,
+        telegram=TelegramService(
+            enabled=True,
+            bot_token="token-de-teste",
+            chat_id="-100123",
+        ),
+    )
+    agora = datetime.now(timezone.utc).replace(tzinfo=None)
+    cache: dict[str, dict[str, float | None]] = {}
+
+    primeiro, ids_primeiro = service.registrar_resultados_com_entregas(
+        [
+            {
+                "rsi_data_id": 1,
+                "symbol": "BTC/USDT",
+                "intervalo": "5m",
+                "rsi": 72.5,
+                "rsi_previous": 69.0,
+                "timestamp": agora - timedelta(minutes=5),
+                "signal_level": "NORMAL",
+            }
+        ],
+        rsi_por_symbol=cache,
+    )
+    segundo, ids_segundo = service.registrar_resultados_com_entregas(
+        [
+            {
+                "rsi_data_id": 2,
+                "symbol": "BTC/USDT",
+                "intervalo": "15m",
+                "rsi": 28.0,
+                "rsi_previous": 31.0,
+                "timestamp": agora - timedelta(minutes=15),
+                "signal_level": "NORMAL",
+            }
+        ],
+        rsi_por_symbol=cache,
+    )
+
+    assert primeiro == {"events_created": 1, "deliveries_created": 1}
+    assert segundo == {"events_created": 1, "deliveries_created": 1}
+    assert ids_primeiro == [1]
+    assert ids_segundo == [2]
+    assert rsi_service_fake.calls == [("BTC/USDT", RSI_TIMEFRAMES)]
+    assert DeliveryRepositoryFake.payloads[0]["rsi_por_intervalo"]["5m"] == 72.5
+    assert DeliveryRepositoryFake.payloads[1]["rsi_por_intervalo"]["15m"] == 28.0
 
 
 def test_event_and_outbox_are_idempotent(app):
@@ -444,6 +551,71 @@ def test_alert_service_dispatches_delivery_with_fresh_candle(app):
         assert result == {"sent": 1, "retried": 0, "expired": 0, "skipped": 0}
         assert len(telegram.messages) == 1
         assert delivery.status == "SENT"
+
+
+def test_alert_service_prioritizes_requested_delivery_with_limit(app):
+    class TelegramFake:
+        configurado = True
+        chat_id = "-100123"
+
+        def __init__(self):
+            self.messages: list[dict] = []
+
+        def enviar_sinal(self, payload):
+            self.messages.append(payload)
+            return "message-id"
+
+    with app.app_context():
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        eventos = []
+        for indice in (1, 2):
+            evento = SignalEvent(
+                rsi_data_id=indice,
+                event_type="ENTER_OVERBOUGHT",
+                signal_level="NORMAL",
+                candle_closed_at=now,
+            )
+            db.session.add(evento)
+            eventos.append(evento)
+        db.session.commit()
+
+        entregas = []
+        for indice, evento in enumerate(eventos, start=1):
+            entrega = NotificationDelivery(
+                signal_event_id=evento.id,
+                channel="TELEGRAM",
+                destination="-100123",
+                dedup_key=f"priority-{indice}",
+                payload={
+                    "symbol": f"COIN{indice}/USDT",
+                    "candle_closed_at": now.replace(
+                        tzinfo=timezone.utc,
+                    ).isoformat(),
+                    "rsi_por_intervalo": {
+                        intervalo: 50.0 for intervalo in RSI_TIMEFRAMES
+                    },
+                },
+                status="PENDING",
+                available_at=now,
+                created_at=now,
+            )
+            db.session.add(entrega)
+            entregas.append(entrega)
+        db.session.commit()
+
+        telegram = TelegramFake()
+        result = SignalAlertService(telegram=telegram).despachar_pendentes(
+            limite=1,
+            delivery_ids=[entregas[1].id],
+            expirar_pendentes=False,
+        )
+
+        assert result == {"sent": 1, "retried": 0, "expired": 0, "skipped": 0}
+        assert [message["symbol"] for message in telegram.messages] == ["COIN2/USDT"]
+        db.session.refresh(entregas[0])
+        db.session.refresh(entregas[1])
+        assert entregas[0].status == "PENDING"
+        assert entregas[1].status == "SENT"
 
 
 def test_alert_service_rechecks_age_after_payload_enrichment(app):

@@ -76,6 +76,46 @@ class NotificationDeliveryRepository:
             .all()
         )
 
+    @staticmethod
+    def buscar_pendentes_por_ids(
+        *,
+        delivery_ids: list[int],
+        limite: int,
+    ) -> list[NotificationDelivery]:
+        """Busca somente entregas novas que devem sair imediatamente."""
+
+        ids = sorted(
+            {
+                int(delivery_id)
+                for delivery_id in delivery_ids
+                if isinstance(delivery_id, int) and delivery_id > 0
+            }
+        )
+        if not ids or limite <= 0:
+            return []
+
+        agora = datetime.now(timezone.utc).replace(
+            tzinfo=None,
+        )
+
+        return (
+            NotificationDelivery.query
+            .filter(
+                NotificationDelivery.id.in_(ids),
+                NotificationDelivery.status.in_((
+                    "PENDING",
+                    "RETRY",
+                )),
+                NotificationDelivery.available_at <= agora,
+            )
+            .order_by(
+                NotificationDelivery.available_at.asc(),
+                NotificationDelivery.id.asc(),
+            )
+            .limit(limite)
+            .all()
+        )
+
     @classmethod
     def expirar_anteriores_a(
         cls,

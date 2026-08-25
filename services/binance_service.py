@@ -73,6 +73,7 @@ class BinanceService:
     # ``fetch_ticker`` do CCXT, não precisa carregar o catálogo completo da
     # Binance antes da primeira consulta. Isso é essencial nas VMs pequenas.
     TICKERS_24H_URL = "https://api.binance.com/api/v3/ticker/24hr"
+    KLINES_URL = "https://api.binance.com/api/v3/klines"
 
     # Um ciclo que excede um minuto não pode gerar alertas Telegram. Mantemos
     # um timeout curto para falhar cedo e nunca transformar uma indisponibilidade
@@ -736,6 +737,57 @@ class BinanceService:
     # OHLCV
     # ==========================================================
 
+    def _buscar_ohlcv_publico(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+    ) -> list[list[Any]]:
+        """Obtém candles spot sem carregar os mercados inteiros no CCXT."""
+
+        response = self._ticker_session.get(
+            self.KLINES_URL,
+            params={
+                "symbol": symbol.replace("/", ""),
+                "interval": timeframe,
+                "limit": limit,
+            },
+            timeout=self.TICKERS_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise TypeError(
+                "A Binance retornou um formato inválido de candles."
+            )
+
+        candles: list[list[Any]] = []
+        for indice, candle in enumerate(payload):
+            if not isinstance(candle, list) or len(candle) < 6:
+                raise ValueError(
+                    f"Candle inválido no índice {indice} para {symbol}."
+                )
+
+            try:
+                candles.append(
+                    [
+                        int(candle[0]),
+                        float(candle[1]),
+                        float(candle[2]),
+                        float(candle[3]),
+                        float(candle[4]),
+                        float(candle[5]),
+                    ]
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Candle inválido no índice {indice} para {symbol}."
+                ) from exc
+
+        return candles
+
     def get_ohlcv(
         self,
         symbol: str,
@@ -776,9 +828,9 @@ class BinanceService:
 
             candles = (
                 self._executar_com_retry(
-                    self.exchange.fetch_ohlcv,
+                    self._buscar_ohlcv_publico,
                     operacao=(
-                        f"fetch_ohlcv "
+                        f"klines "
                         f"{symbol} "
                         f"{timeframe}"
                     ),
@@ -807,6 +859,17 @@ class BinanceService:
             )
 
             return candles
+
+        except requests.RequestException:
+
+            logger.exception(
+                "Erro de rede ao obter OHLCV | "
+                "symbol=%s | timeframe=%s",
+                symbol,
+                timeframe,
+            )
+
+            raise
 
         except ccxt.NetworkError:
 

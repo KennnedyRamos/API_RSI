@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import ccxt
 
@@ -933,6 +933,9 @@ class RSIService:
             dict[str, dict[str, Any]]
         ] = None,
         salvar: bool = True,
+        on_result_completed: (
+            Callable[[dict[str, Any]], None] | None
+        ) = None,
     ) -> dict[str, Any]:
         """
         Processa todos os símbolos USDT em determinado
@@ -940,6 +943,10 @@ class RSIService:
 
         O método pode receber símbolos e tickers já carregados
         pelo Worker para evitar chamadas repetidas à Binance.
+
+        Quando informado, ``on_result_completed`` é chamado logo depois de
+        cada resultado persistido. Isso permite que o worker inicie o envio
+        de um alerta sem aguardar os demais símbolos do mesmo timeframe.
         """
 
         self._validar_intervalo(
@@ -1064,6 +1071,20 @@ class RSIService:
                 results.append(
                     resultado
                 )
+
+                if on_result_completed is not None:
+                    try:
+                        on_result_completed(resultado)
+                    except Exception:
+                        # A persistência do RSI já foi concluída; uma falha
+                        # na etapa secundária de alerta não deve interromper
+                        # a coleta dos outros pares.
+                        logger.exception(
+                            "Falha no callback após processar RSI | "
+                            "symbol=%s | intervalo=%s",
+                            symbol_normalizado,
+                            intervalo,
+                        )
 
             except ccxt.NetworkError as exc:
 
