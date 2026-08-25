@@ -895,11 +895,11 @@ class BinanceService:
         symbols: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """
-        Obtém os tickers da Binance em uma única chamada.
+        Obtém os tickers da Binance.
 
-        Quando ``symbols`` é informado, pede somente esses pares à exchange.
-        Isso evita carregar milhares de tickers quando o worker está operando
-        em modo reduzido numa VM pequena.
+        Quando ``symbols`` é informado, consulta cada par separadamente. Isso
+        evita que a resposta em lote da Binance carregue milhares de tickers
+        numa VM pequena.
         """
 
         selected_symbols: list[str] | None = None
@@ -911,17 +911,23 @@ class BinanceService:
                 )
             )
 
+        if selected_symbols:
+            tickers = {
+                symbol: self.get_ticker(symbol)
+                for symbol in selected_symbols
+            }
+            logger.info(
+                "Tickers Binance obtidos individualmente | total=%d",
+                len(tickers),
+            )
+            return tickers
+
         try:
 
             tickers = (
                 self._executar_com_retry(
                     self.exchange.fetch_tickers,
-                    operacao=(
-                        "fetch_tickers selecionados"
-                        if selected_symbols
-                        else "fetch_tickers"
-                    ),
-                    **({"symbols": selected_symbols} if selected_symbols else {}),
+                    operacao="fetch_tickers",
                 )
             )
 
@@ -932,9 +938,8 @@ class BinanceService:
                 )
 
             logger.info(
-                "Tickers Binance obtidos | total=%d | selecionados=%s",
+                "Tickers Binance obtidos | total=%d | selecionados=todos",
                 len(tickers),
-                len(selected_symbols) if selected_symbols else "todos",
             )
 
             return tickers

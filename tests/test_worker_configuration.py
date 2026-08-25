@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from services.binance_service import BinanceService
 from workers.rsi_worker import RSIWorker
 
 
@@ -90,3 +91,16 @@ def test_worker_keeps_complete_ticker_request_without_symbol_configuration(monke
     worker._obter_tickers(["BTC/USDT", "ETH/USDT"])
 
     assert binance.get_tickers_calls == [None]
+
+
+def test_selected_tickers_are_fetched_individually():
+    service = object.__new__(BinanceService)
+    calls: list[str] = []
+
+    service.validar_symbol = FakeBinance().validar_symbol
+    service.get_ticker = lambda symbol: calls.append(symbol) or {"symbol": symbol}
+
+    tickers = service.get_tickers(["BTCUSDT", "ETH/USDT", "BTC-USDT"])
+
+    assert set(tickers) == {"BTC/USDT", "ETH/USDT"}
+    assert calls == ["BTC/USDT", "ETH/USDT"]
