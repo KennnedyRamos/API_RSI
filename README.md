@@ -95,6 +95,9 @@ APP_TIMEZONE=America/Sao_Paulo
 ```
 
 Nunca versione token ou chat ID de produção. Se `TELEGRAM_ENABLED=false`, a API e o painel continuam funcionando e nenhum POST é feito ao Telegram.
+Para evitar sinais atrasados, o bot envia somente alertas cujo candle fechou há
+no máximo **1 minuto**; entregas pendentes mais antigas são marcadas como
+expiradas e não chegam ao chat.
 
 ## Principais endpoints
 

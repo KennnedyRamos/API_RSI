@@ -12,6 +12,9 @@ from database.models.notification_delivery import NotificationDelivery
 class NotificationDeliveryRepository:
     """Fila outbox para canais externos, inicialmente o Telegram."""
 
+    EXPIRED_STATUSES = ("PENDING", "RETRY")
+    EXPIRATION_REASON = "Expirada: alerta gerado há mais de 1 minuto."
+
     @staticmethod
     def criar_ou_buscar(
         *,
@@ -73,6 +76,32 @@ class NotificationDeliveryRepository:
             .all()
         )
 
+    @classmethod
+    def expirar_anteriores_a(
+        cls,
+        *,
+        cutoff: datetime,
+    ) -> int:
+        """Descarta pendências antigas sem apagar o histórico da outbox."""
+
+        expiradas = (
+            NotificationDelivery.query
+            .filter(
+                NotificationDelivery.status.in_(cls.EXPIRED_STATUSES),
+                NotificationDelivery.created_at < cutoff,
+            )
+            .update(
+                {
+                    NotificationDelivery.status: "EXPIRED",
+                    NotificationDelivery.last_error: cls.EXPIRATION_REASON,
+                },
+                synchronize_session=False,
+            )
+        )
+        if expiradas:
+            db.session.commit()
+        return expiradas
+
     @staticmethod
     def marcar_enviando(
         entrega: NotificationDelivery,
@@ -80,6 +109,15 @@ class NotificationDeliveryRepository:
         entrega.status = "SENDING"
         entrega.attempts += 1
         entrega.last_error = None
+        db.session.commit()
+
+    @classmethod
+    def marcar_expirada(
+        cls,
+        entrega: NotificationDelivery,
+    ) -> None:
+        entrega.status = "EXPIRED"
+        entrega.last_error = cls.EXPIRATION_REASON
         db.session.commit()
 
     @staticmethod

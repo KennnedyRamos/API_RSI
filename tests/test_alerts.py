@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app import db
 from app.services.signal_alert_service import SignalAlertService
@@ -218,13 +218,10 @@ def test_alert_service_enriches_incomplete_pending_payload():
 
 def test_event_and_outbox_are_idempotent(app):
     with app.app_context():
-        timestamp = datetime(
-            2026,
-            8,
-            21,
-            20,
-            tzinfo=timezone.utc,
-        ).replace(tzinfo=None)
+        timestamp = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            - timedelta(hours=1, seconds=10)
+        )
         rsi_por_intervalo = {
             "5m": 65.12,
             "15m": 67.34,
@@ -305,3 +302,198 @@ def test_event_and_outbox_are_idempotent(app):
         assert NotificationDelivery.query.count() == 1
         entrega = NotificationDelivery.query.one()
         assert entrega.payload["rsi_por_intervalo"] == rsi_por_intervalo
+
+
+def test_alert_service_expires_delivery_with_old_candle(app):
+    class TelegramFake:
+        configurado = True
+        chat_id = "-100123"
+
+        def __init__(self):
+            self.messages: list[dict] = []
+
+        def enviar_sinal(self, payload):
+            self.messages.append(payload)
+            return "message-id"
+
+    with app.app_context():
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        event = SignalEvent(
+            rsi_data_id=1,
+            event_type="ENTER_OVERBOUGHT",
+            signal_level="NORMAL",
+            candle_closed_at=now - timedelta(minutes=2),
+        )
+        db.session.add(event)
+        db.session.commit()
+        delivery = NotificationDelivery(
+            signal_event_id=event.id,
+            channel="TELEGRAM",
+            destination="-100123",
+            dedup_key="old-candle",
+            payload={
+                "symbol": "BTC/USDT",
+                "candle_closed_at": (
+                    now - timedelta(minutes=2)
+                ).replace(tzinfo=timezone.utc).isoformat(),
+                "rsi_por_intervalo": {
+                    intervalo: 50.0 for intervalo in RSI_TIMEFRAMES
+                },
+            },
+            status="PENDING",
+            available_at=now,
+            created_at=now,
+        )
+        db.session.add(delivery)
+        db.session.commit()
+
+        telegram = TelegramFake()
+        result = SignalAlertService(telegram=telegram).despachar_pendentes()
+
+        assert result == {"sent": 0, "retried": 0, "expired": 1, "skipped": 0}
+        assert telegram.messages == []
+        assert delivery.status == "EXPIRED"
+
+
+def test_alert_service_expires_old_pending_outbox_before_dispatch(app):
+    class TelegramFake:
+        configurado = True
+        chat_id = "-100123"
+
+        def enviar_sinal(self, payload):
+            raise AssertionError("Uma entrega expirada não pode ser enviada.")
+
+    with app.app_context():
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        event = SignalEvent(
+            rsi_data_id=1,
+            event_type="ENTER_OVERSOLD",
+            signal_level="NORMAL",
+            candle_closed_at=now,
+        )
+        db.session.add(event)
+        db.session.commit()
+        delivery = NotificationDelivery(
+            signal_event_id=event.id,
+            channel="TELEGRAM",
+            destination="-100123",
+            dedup_key="old-outbox",
+            payload={"symbol": "ETH/USDT"},
+            status="PENDING",
+            available_at=now - timedelta(minutes=2),
+            created_at=now - timedelta(minutes=2),
+        )
+        db.session.add(delivery)
+        db.session.commit()
+
+        result = SignalAlertService(
+            telegram=TelegramFake(),
+        ).despachar_pendentes()
+
+        assert result == {"sent": 0, "retried": 0, "expired": 1, "skipped": 0}
+        db.session.refresh(delivery)
+        assert delivery.status == "EXPIRED"
+
+
+def test_alert_service_dispatches_delivery_with_fresh_candle(app):
+    class TelegramFake:
+        configurado = True
+        chat_id = "-100123"
+
+        def __init__(self):
+            self.messages: list[dict] = []
+
+        def enviar_sinal(self, payload):
+            self.messages.append(payload)
+            return "message-id"
+
+    with app.app_context():
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        event = SignalEvent(
+            rsi_data_id=1,
+            event_type="ENTER_OVERBOUGHT",
+            signal_level="NORMAL",
+            candle_closed_at=now - timedelta(seconds=20),
+        )
+        db.session.add(event)
+        db.session.commit()
+        delivery = NotificationDelivery(
+            signal_event_id=event.id,
+            channel="TELEGRAM",
+            destination="-100123",
+            dedup_key="fresh-candle",
+            payload={
+                "symbol": "BTC/USDT",
+                "candle_closed_at": (
+                    now - timedelta(seconds=20)
+                ).replace(tzinfo=timezone.utc).isoformat(),
+                "rsi_por_intervalo": {
+                    intervalo: 50.0 for intervalo in RSI_TIMEFRAMES
+                },
+            },
+            status="PENDING",
+            available_at=now,
+            created_at=now,
+        )
+        db.session.add(delivery)
+        db.session.commit()
+
+        telegram = TelegramFake()
+        result = SignalAlertService(telegram=telegram).despachar_pendentes()
+
+        assert result == {"sent": 1, "retried": 0, "expired": 0, "skipped": 0}
+        assert len(telegram.messages) == 1
+        assert delivery.status == "SENT"
+
+
+def test_alert_service_rechecks_age_after_payload_enrichment(app):
+    class TelegramFake:
+        configurado = True
+        chat_id = "-100123"
+
+        def enviar_sinal(self, payload):
+            raise AssertionError("Um alerta que venceu no ciclo não pode ser enviado.")
+
+    with app.app_context():
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        event = SignalEvent(
+            rsi_data_id=1,
+            event_type="ENTER_OVERBOUGHT",
+            signal_level="NORMAL",
+            candle_closed_at=now - timedelta(seconds=20),
+        )
+        db.session.add(event)
+        db.session.commit()
+        delivery = NotificationDelivery(
+            signal_event_id=event.id,
+            channel="TELEGRAM",
+            destination="-100123",
+            dedup_key="expires-during-enrichment",
+            payload={
+                "symbol": "BTC/USDT",
+                "candle_closed_at": (
+                    now - timedelta(seconds=20)
+                ).replace(tzinfo=timezone.utc).isoformat(),
+                "rsi_por_intervalo": {
+                    intervalo: 50.0 for intervalo in RSI_TIMEFRAMES
+                },
+            },
+            status="PENDING",
+            available_at=now,
+            created_at=now,
+        )
+        db.session.add(delivery)
+        db.session.commit()
+
+        service = SignalAlertService(telegram=TelegramFake())
+        freshness_checks = iter((True, False))
+
+        def entrega_esta_recente(_):
+            return next(freshness_checks)
+
+        service._entrega_esta_recente = entrega_esta_recente
+
+        result = service.despachar_pendentes()
+
+        assert result == {"sent": 0, "retried": 0, "expired": 1, "skipped": 0}
+        assert delivery.status == "EXPIRED"

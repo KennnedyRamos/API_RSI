@@ -31,6 +31,7 @@ class SignalAlertService:
 
     DEFAULT_MAX_DISPATCH_PER_CYCLE = 10
     DEFAULT_MAX_ATTEMPTS = 5
+    MAX_ALERT_AGE = timedelta(minutes=1)
 
     def __init__(
         self,
@@ -109,6 +110,15 @@ class SignalAlertService:
             if not criado or not self._deve_enfileirar(resultado):
                 continue
 
+            if not self._esta_recente(evento.candle_closed_at):
+                logger.info(
+                    "Alerta Telegram expirado antes do enfileiramento | "
+                    "symbol=%s | intervalo=%s",
+                    resultado.get("symbol"),
+                    resultado.get("intervalo"),
+                )
+                continue
+
             symbol = str(resultado.get("symbol", "")).strip()
             if symbol not in rsi_por_symbol:
                 rsi_por_symbol[symbol] = self._obter_rsi_por_intervalo(
@@ -119,6 +129,7 @@ class SignalAlertService:
                 resultado,
                 event_type=event_type,
                 rsi_por_intervalo=rsi_por_symbol[symbol],
+                candle_closed_at=evento.candle_closed_at,
             )
             dedup_key = self._dedup_key(
                 payload,
@@ -158,11 +169,15 @@ class SignalAlertService:
             return {
                 "sent": 0,
                 "retried": 0,
+                "expired": 0,
                 "skipped": 1,
             }
 
         enviadas = 0
         reagendadas = 0
+        expiradas = self.delivery_repository.expirar_anteriores_a(
+            cutoff=self._freshness_cutoff(),
+        )
 
         entregas = self.delivery_repository.buscar_pendentes(
             limite=self.max_dispatch_per_cycle,
@@ -171,12 +186,22 @@ class SignalAlertService:
 
         for entrega in entregas:
             try:
+                if not self._entrega_esta_recente(entrega):
+                    self.delivery_repository.marcar_expirada(entrega)
+                    expiradas += 1
+                    continue
+
                 payload = self._enriquecer_payload_rsi(
                     entrega.payload,
                     rsi_por_symbol=rsi_por_symbol,
                 )
                 if payload != entrega.payload:
                     entrega.payload = payload
+
+                if not self._entrega_esta_recente(entrega):
+                    self.delivery_repository.marcar_expirada(entrega)
+                    expiradas += 1
+                    continue
 
                 self.delivery_repository.marcar_enviando(entrega)
                 message_id = self.telegram.enviar_sinal(
@@ -223,6 +248,7 @@ class SignalAlertService:
         return {
             "sent": enviadas,
             "retried": reagendadas,
+            "expired": expiradas,
             "skipped": 0,
         }
 
@@ -298,6 +324,34 @@ class SignalAlertService:
     @staticmethod
     def _retry_delay(attempts: int) -> float:
         return min(300.0, 5.0 * (2 ** max(0, attempts - 1)))
+
+    @classmethod
+    def _freshness_cutoff(cls) -> datetime:
+        return datetime.now(timezone.utc).replace(tzinfo=None) - cls.MAX_ALERT_AGE
+
+    @classmethod
+    def _esta_recente(cls, timestamp: datetime | None) -> bool:
+        if timestamp is None:
+            return False
+        if timestamp.tzinfo is not None:
+            timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+        return timestamp >= cls._freshness_cutoff()
+
+    @staticmethod
+    def _payload_candle_closed_at(payload: dict[str, Any]) -> datetime | None:
+        value = payload.get("candle_closed_at")
+        if isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _entrega_esta_recente(self, entrega: Any) -> bool:
+        candle_closed_at = self._payload_candle_closed_at(entrega.payload)
+        return self._esta_recente(candle_closed_at or entrega.created_at)
 
     def _obter_rsi_por_intervalo(
         self,
@@ -408,6 +462,7 @@ class SignalAlertService:
         *,
         event_type: str,
         rsi_por_intervalo: dict[str, float | None],
+        candle_closed_at: datetime,
     ) -> dict[str, Any]:
         payload = {
             key: resultado.get(key)
@@ -434,6 +489,10 @@ class SignalAlertService:
             ).isoformat()
         else:
             payload["candle_timestamp"] = str(timestamp or "")
+
+        if candle_closed_at.tzinfo is None:
+            candle_closed_at = candle_closed_at.replace(tzinfo=timezone.utc)
+        payload["candle_closed_at"] = candle_closed_at.isoformat()
 
         payload["event_type"] = event_type
         payload["detected_at"] = datetime.now(
