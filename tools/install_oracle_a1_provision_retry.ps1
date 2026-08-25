@@ -36,7 +36,7 @@ $trigger = New-ScheduledTaskTrigger -Once -At $firstRun `
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Tenta criar a Oracle A1 de 1 OCPU e 6 GB até a Oracle aceitar a criação." -Force | Out-Null
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Tenta criar a Oracle A1 de 1 OCPU e 6 GB até confirmar uma instância utilizável." -Force | Out-Null
 
 if (Get-ScheduledTask -TaskName $legacyMonitorTask -ErrorAction SilentlyContinue) {
     Disable-ScheduledTask -TaskName $legacyMonitorTask | Out-Null
@@ -44,5 +44,5 @@ if (Get-ScheduledTask -TaskName $legacyMonitorTask -ErrorAction SilentlyContinue
 
 Write-Host "Tarefa agendada: $TaskName"
 Write-Host "Frequência: a cada $IntervalMinutes minuto(s), somente enquanto este usuário estiver conectado."
-Write-Host "A tarefa será desativada automaticamente quando a Oracle aceitar a criação da A1."
+Write-Host "A tarefa será desativada quando a A1 criada deixar o estado de provisionamento."
 Write-Host "Estado e log: $env:LOCALAPPDATA\RsiRadar\oracle-a1-provision-retry-state.json"

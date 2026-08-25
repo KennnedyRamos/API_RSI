@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Tenta provisionar uma Oracle A1 gratuita até a Oracle aceitar a criação.
+"""Tenta provisionar uma Oracle A1 gratuita até que exista uma A1 utilizável.
 
 Este utilitário é propositalmente separado do monitor de capacidade: ele cria
 uma VM somente quando é executado explicitamente pela tarefa agendada local.
 Ele não remove nem altera instâncias existentes e interrompe a própria tarefa
-após a Oracle aceitar uma criação ou encontrar uma A1 já criada com o mesmo nome.
+quando confirma uma A1 fora do estado transitório de provisionamento.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from uuid import uuid4
 
 try:
     import oci
@@ -40,10 +41,18 @@ DEFAULT_STATE_FILE = APP_DIR / "oracle-a1-provision-retry-state.json"
 DEFAULT_LOG_FILE = APP_DIR / "oracle-a1-provision-retry.log"
 DEFAULT_LOCK_FILE = APP_DIR / "oracle-a1-provision-retry.lock"
 LOCK_STALE_SECONDS = 15 * 60
+RETRY_TOKEN_TTL_SECONDS = 23 * 60 * 60
+MAX_LOG_BYTES = 512 * 1024
+LOG_TAIL_BYTES = 128 * 1024
+TRANSIENT_INSTANCE_STATES = {"PROVISIONING", "STARTING", "TERMINATING"}
 
 
 class RetryError(RuntimeError):
     """Erro seguro para a saída da tarefa agendada."""
+
+
+class PermanentRetryError(RetryError):
+    """Erro que exige intervenção humana antes de uma nova tentativa."""
 
 
 def now_iso() -> str:
@@ -60,8 +69,25 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def read_json(path: Path) -> dict[str, Any]:
+    """Lê o estado anterior sem tornar um arquivo corrompido bloqueante."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def append_log(path: Path, result: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size >= MAX_LOG_BYTES:
+        with path.open("rb") as existing_log:
+            existing_log.seek(-LOG_TAIL_BYTES, os.SEEK_END)
+            tail = existing_log.read().decode("utf-8", errors="replace")
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text("[log anterior truncado]\n" + tail, encoding="utf-8")
+        temporary.replace(path)
     summary = (
         f"{result['checked_at']} | {result['outcome']}"
         f" | {result.get('detail', '')}".rstrip()
@@ -100,7 +126,7 @@ def exclusive_lock(path: Path) -> Iterator[None]:
 
 def load_oci_config(config_file: Path, profile: str) -> dict[str, str]:
     if not config_file.exists():
-        raise RetryError("A configuração OCI local não foi encontrada.")
+        raise PermanentRetryError("A configuração OCI local não foi encontrada.")
 
     try:
         config = oci.config.from_file(
@@ -109,7 +135,9 @@ def load_oci_config(config_file: Path, profile: str) -> dict[str, str]:
         )
         oci.config.validate_config(config)
     except Exception as exc:
-        raise RetryError("Não foi possível validar a configuração OCI local.") from exc
+        raise PermanentRetryError(
+            "Não foi possível validar a configuração OCI local."
+        ) from exc
 
     return config
 
@@ -121,7 +149,7 @@ def resolve_availability_domain(
 ) -> str:
     domains = identity_client.list_availability_domains(tenancy_id).data
     if not domains:
-        raise RetryError("Nenhum domínio de disponibilidade foi encontrado.")
+        raise PermanentRetryError("Nenhum domínio de disponibilidade foi encontrado.")
 
     if requested_domain:
         expected = requested_domain.casefold()
@@ -129,12 +157,14 @@ def resolve_availability_domain(
             candidates = (domain.name, getattr(domain, "display_name", None))
             if any(candidate and candidate.casefold() == expected for candidate in candidates):
                 return domain.name
-        raise RetryError("O domínio de disponibilidade informado não existe na região.")
+        raise PermanentRetryError(
+            "O domínio de disponibilidade informado não existe na região."
+        )
 
     if len(domains) == 1:
         return domains[0].name
 
-    raise RetryError(
+    raise PermanentRetryError(
         "A região possui mais de um domínio de disponibilidade; informe "
         "--availability-domain para escolher um explicitamente."
     )
@@ -147,10 +177,15 @@ def find_subnet(network_client: Any, tenancy_id: str, subnet_name: str) -> Any:
         if subnet.display_name == subnet_name
     ]
     if len(matches) != 1:
-        raise RetryError(
+        raise PermanentRetryError(
             "Não foi possível identificar unicamente a subnet configurada para a A1."
         )
-    return matches[0]
+    subnet = matches[0]
+    if getattr(subnet, "prohibit_public_ip_on_vnic", False):
+        raise PermanentRetryError(
+            "A subnet selecionada bloqueia IP público e não serve para este deploy."
+        )
+    return subnet
 
 
 def latest_oracle_linux_9_image(compute_client: Any, tenancy_id: str) -> Any:
@@ -165,19 +200,77 @@ def latest_oracle_linux_9_image(compute_client: Any, tenancy_id: str) -> Any:
     for image in images:
         if image.lifecycle_state == "AVAILABLE":
             return image
-    raise RetryError("Nenhuma imagem Oracle Linux 9 compatível com a A1 foi encontrada.")
+    raise PermanentRetryError(
+        "Nenhuma imagem Oracle Linux 9 compatível com a A1 foi encontrada."
+    )
 
 
-def existing_a1(compute_client: Any, tenancy_id: str, display_name: str) -> Any | None:
+def active_a1_instances(compute_client: Any, tenancy_id: str) -> list[Any]:
+    """Lista todas as A1 ativas, inclusive quando a API precisa de paginação."""
+
     ignored_states = {"TERMINATED", "TERMINATING"}
-    for instance in compute_client.list_instances(tenancy_id).data:
-        if (
-            instance.display_name == display_name
-            and instance.shape == SHAPE
-            and instance.lifecycle_state not in ignored_states
-        ):
-            return instance
-    return None
+    response = oci.pagination.list_call_get_all_results(
+        compute_client.list_instances,
+        tenancy_id,
+    )
+    return [
+        instance
+        for instance in response.data
+        if instance.shape == SHAPE and instance.lifecycle_state not in ignored_states
+    ]
+
+
+def instance_result(instance: Any, *, same_display_name: bool) -> dict[str, Any]:
+    state = instance.lifecycle_state
+    if state in TRANSIENT_INSTANCE_STATES:
+        outcome = "INSTANCE_PROVISIONING" if same_display_name else "OTHER_A1_PROVISIONING"
+        detail = f"{state}: aguardando a instância A1 já solicitada"
+        disable_task = False
+    else:
+        outcome = "INSTANCE_ALREADY_EXISTS" if same_display_name else "OTHER_A1_ALREADY_EXISTS"
+        detail = f"{state}: uma A1 ativa já ocupa a capacidade da conta"
+        disable_task = True
+    return {
+        "checked_at": now_iso(),
+        "outcome": outcome,
+        "detail": detail,
+        "instance_id": instance.id,
+        "disable_task": disable_task,
+    }
+
+
+def retry_token_from_state(state: dict[str, Any]) -> str:
+    """Reutiliza o token durante 23 h em casos de resposta inconclusiva."""
+
+    token = state.get("opc_retry_token")
+    requested_at = state.get("launch_requested_at")
+    if isinstance(token, str) and isinstance(requested_at, str):
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(requested_at)
+        except (TypeError, ValueError):
+            age = None
+        if age is not None and 0 <= age.total_seconds() < RETRY_TOKEN_TTL_SECONDS:
+            return token
+    return uuid4().hex
+
+
+def pending_launch_result(
+    token: str,
+    requested_at: str,
+    selection: dict[str, Any],
+    *,
+    outcome: str,
+    detail: str,
+) -> dict[str, Any]:
+    return {
+        "checked_at": now_iso(),
+        "outcome": outcome,
+        "detail": detail,
+        "opc_retry_token": token,
+        "launch_requested_at": requested_at,
+        **selection,
+        "disable_task": False,
+    }
 
 
 def is_capacity_error(exc: Exception) -> bool:
@@ -187,9 +280,13 @@ def is_capacity_error(exc: Exception) -> bool:
     return "out of host capacity" in combined or "host capacity" in combined
 
 
-def disable_scheduled_task(task_name: str) -> str:
+def is_permanent_service_error(exc: Any) -> bool:
+    return getattr(exc, "status", None) in {400, 401, 403, 404}
+
+
+def disable_scheduled_task(task_name: str) -> tuple[bool, str]:
     if os.name != "nt":
-        return "tarefa não desativada: este comando requer Windows"
+        return False, "tarefa não desativada: este comando requer Windows"
 
     result = subprocess.run(
         ["schtasks.exe", "/Change", "/TN", task_name, "/Disable"],
@@ -198,8 +295,8 @@ def disable_scheduled_task(task_name: str) -> str:
         check=False,
     )
     if result.returncode == 0:
-        return "tarefa agendada desativada"
-    return "não foi possível desativar automaticamente a tarefa agendada"
+        return True, "tarefa agendada desativada"
+    return False, "não foi possível desativar automaticamente a tarefa agendada"
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -237,7 +334,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--task-name",
         default=DEFAULT_TASK_NAME,
-        help="Tarefa Windows a desativar após uma criação aceita.",
+        help="Tarefa Windows a desativar após confirmar a criação da instância.",
     )
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
     parser.add_argument("--log-file", type=Path, default=DEFAULT_LOG_FILE)
@@ -251,24 +348,25 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    previous_state = read_json(args.state_file)
     config = load_oci_config(args.config_file, args.profile)
     tenancy_id = config["tenancy"]
     identity_client = oci.identity.IdentityClient(config)
     compute_client = oci.core.ComputeClient(config)
     network_client = oci.core.VirtualNetworkClient(config)
 
-    existing = existing_a1(compute_client, tenancy_id, args.display_name)
-    if existing:
-        return {
-            "checked_at": now_iso(),
-            "outcome": "INSTANCE_ALREADY_EXISTS",
-            "detail": f"{existing.lifecycle_state}: {existing.id}",
-            "instance_id": existing.id,
-            "disable_task": True,
-        }
+    existing_instances = active_a1_instances(compute_client, tenancy_id)
+    matching_instance = next(
+        (instance for instance in existing_instances if instance.display_name == args.display_name),
+        None,
+    )
+    if matching_instance:
+        return instance_result(matching_instance, same_display_name=True)
+    if existing_instances:
+        return instance_result(existing_instances[0], same_display_name=False)
 
     if not args.ssh_public_key.exists():
-        raise RetryError("A chave pública SSH configurada não foi encontrada.")
+        raise PermanentRetryError("A chave pública SSH configurada não foi encontrada.")
 
     availability_domain = resolve_availability_domain(
         identity_client,
@@ -295,7 +393,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     ssh_key = args.ssh_public_key.read_text(encoding="utf-8").strip()
     if not ssh_key:
-        raise RetryError("A chave pública SSH configurada está vazia.")
+        raise PermanentRetryError("A chave pública SSH configurada está vazia.")
 
     launch_details = oci.core.models.LaunchInstanceDetails(
         availability_domain=availability_domain,
@@ -316,8 +414,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         ),
         metadata={"ssh_authorized_keys": ssh_key},
     )
+    retry_token = retry_token_from_state(previous_state)
+    requested_at = now_iso()
+    write_json(
+        args.state_file,
+        pending_launch_result(
+            retry_token,
+            requested_at,
+            selection,
+            outcome="LAUNCH_REQUEST_PENDING",
+            detail="solicitação de criação enviada; aguardando a resposta da Oracle",
+        ),
+    )
     try:
-        instance = compute_client.launch_instance(launch_details).data
+        instance = compute_client.launch_instance(
+            launch_details,
+            opc_retry_token=retry_token,
+        ).data
     except oci.exceptions.ServiceError as exc:
         if is_capacity_error(exc):
             return {
@@ -327,18 +440,62 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 **selection,
                 "disable_task": False,
             }
-        raise RetryError(
-            f"A Oracle recusou a criação (HTTP {exc.status}, código {exc.code})."
-        ) from exc
+        if is_permanent_service_error(exc):
+            raise PermanentRetryError(
+                f"A Oracle recusou a criação (HTTP {exc.status}, código {exc.code})."
+            ) from exc
+        return pending_launch_result(
+            retry_token,
+            requested_at,
+            selection,
+            outcome="LAUNCH_UNCONFIRMED",
+            detail=(
+                "a resposta da Oracle foi inconclusiva; a próxima tentativa usará "
+                "o mesmo token de idempotência"
+            ),
+        )
+    except Exception:
+        return pending_launch_result(
+            retry_token,
+            requested_at,
+            selection,
+            outcome="LAUNCH_UNCONFIRMED",
+            detail=(
+                "a conexão terminou sem confirmação; a próxima tentativa usará "
+                "o mesmo token de idempotência"
+            ),
+        )
 
     return {
         "checked_at": now_iso(),
         "outcome": "LAUNCH_ACCEPTED",
         "detail": f"{instance.lifecycle_state}: {instance.id}",
         "instance_id": instance.id,
+        "opc_retry_token": retry_token,
+        "launch_requested_at": requested_at,
         **selection,
-        "disable_task": True,
+        "disable_task": False,
     }
+
+
+def finalize_result(args: argparse.Namespace, result: dict[str, Any]) -> int:
+    """Persiste o resultado e torna falha a desativação da tarefa visível."""
+
+    exit_code = 0
+    if result.pop("disable_task", False):
+        disabled, task_action = disable_scheduled_task(args.task_name)
+        result["task_action"] = task_action
+        if not disabled:
+            result["task_disable_failed"] = True
+            exit_code = 1
+
+    write_json(args.state_file, result)
+    append_log(args.log_file, result)
+    printable_result = {
+        key: value for key, value in result.items() if key != "opc_retry_token"
+    }
+    print(json.dumps(printable_result, ensure_ascii=False))
+    return exit_code
 
 
 def main() -> int:
@@ -346,12 +503,23 @@ def main() -> int:
     try:
         with exclusive_lock(args.lock_file):
             result = run(args)
-            if result.pop("disable_task"):
-                result["task_action"] = disable_scheduled_task(args.task_name)
-            write_json(args.state_file, result)
-            append_log(args.log_file, result)
-            print(json.dumps(result, ensure_ascii=False))
-            return 0
+            if args.dry_run:
+                printable_result = {
+                    key: value for key, value in result.items() if key != "opc_retry_token"
+                }
+                print(json.dumps(printable_result, ensure_ascii=False))
+                return 0
+            return finalize_result(args, result)
+    except PermanentRetryError as exc:
+        result = {
+            "checked_at": now_iso(),
+            "outcome": "ERROR_PERMANENT",
+            "detail": str(exc),
+            "disable_task": True,
+        }
+        exit_code = finalize_result(args, result)
+        print(f"ERRO: {exc}", file=sys.stderr)
+        return 1 if exit_code == 0 else exit_code
     except RetryError as exc:
         result = {
             "checked_at": now_iso(),
