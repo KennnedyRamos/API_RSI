@@ -16,5 +16,7 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pip check
       - run: pytest -q
       - run: ruff check app database services workers tests main.py worker.py migrations/env.py --no-cache --select F,E9
+      - run: ENV_FILE=deploy/.env.production.example CADDY_DOMAIN=rsi-radar.example.com CADDY_EMAIL=ops@example.com docker compose -f compose.yml config --quiet

@@ -553,6 +553,60 @@ def test_alert_service_dispatches_delivery_with_fresh_candle(app):
         assert delivery.status == "SENT"
 
 
+def test_alert_service_recovers_stale_sending_delivery(app):
+    class TelegramFake:
+        configurado = True
+        chat_id = "-100123"
+
+        def __init__(self):
+            self.messages: list[dict] = []
+
+        def enviar_sinal(self, payload):
+            self.messages.append(payload)
+            return "message-id"
+
+    with app.app_context():
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        event = SignalEvent(
+            rsi_data_id=1,
+            event_type="ENTER_OVERBOUGHT",
+            signal_level="NORMAL",
+            candle_closed_at=now - timedelta(seconds=20),
+        )
+        db.session.add(event)
+        db.session.commit()
+        delivery = NotificationDelivery(
+            signal_event_id=event.id,
+            channel="TELEGRAM",
+            destination="-100123",
+            dedup_key="stale-sending",
+            payload={
+                "symbol": "BTC/USDT",
+                "candle_closed_at": (
+                    now - timedelta(seconds=20)
+                ).replace(tzinfo=timezone.utc).isoformat(),
+                "rsi_por_intervalo": {
+                    intervalo: 50.0 for intervalo in RSI_TIMEFRAMES
+                },
+            },
+            status="SENDING",
+            available_at=now,
+            created_at=now,
+        )
+        db.session.add(delivery)
+        db.session.commit()
+        delivery.updated_at = now - timedelta(seconds=20)
+        db.session.commit()
+
+        telegram = TelegramFake()
+        result = SignalAlertService(telegram=telegram).despachar_pendentes()
+
+        assert result == {"sent": 1, "retried": 0, "expired": 0, "skipped": 0}
+        assert len(telegram.messages) == 1
+        db.session.refresh(delivery)
+        assert delivery.status == "SENT"
+
+
 def test_alert_service_prioritizes_requested_delivery_with_limit(app):
     class TelegramFake:
         configurado = True

@@ -1,11 +1,40 @@
-# Ignora arquivos específicos da sua configuração local
+# Variáveis de ambiente e segredos locais.
 .env
-.env.production
+.env.*
+!.env.example
+!deploy/.env.production.example
+!tools/oracle_a1_telegram.env.example
+
+# Arquivos de runtime e configuração local de deploy.
 deploy/.env.production
-.vscode/
-.idea/
+deploy/*.local
+tools/*.env
+!tools/oracle_a1_telegram.env.example
+tools/*.lock
+tools/*.log
+tools/*.state
+
+# Ambientes, caches e artefatos Python.
 .venv/
 __pycache__/
 *.py[cod]
+*.pyo
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Bancos e logs locais.
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Configurações de IDE.
+.vscode/
+.idea/

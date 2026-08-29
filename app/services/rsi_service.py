@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import ccxt
+import requests
 
 from app.utils.rsi import (
     calcular_diferenca_rsi,
@@ -133,6 +134,7 @@ class RSIService:
             dict[str, Any]
         ] = None,
         salvar: bool = True,
+        atualizar_cache_market_data: bool = True,
     ) -> dict[str, Any]:
         """
         Processa um símbolo em determinado timeframe.
@@ -357,10 +359,9 @@ class RSIService:
         # MARKET DATA
         # ======================================================
 
-        market_data = (
-            self._obter_market_data(
-                symbol=symbol
-            )
+        market_data = self._obter_market_data(
+            symbol=symbol,
+            atualizar_cache=atualizar_cache_market_data,
         )
 
         # ======================================================
@@ -796,6 +797,8 @@ class RSIService:
     def _obter_market_data(
         self,
         symbol: str,
+        *,
+        atualizar_cache: bool = True,
     ) -> dict[str, Any]:
         """
         Obtém market cap e ranking através do MarketService.
@@ -814,7 +817,8 @@ class RSIService:
         try:
 
             data = self.market.get_market_data(
-                symbol
+                symbol,
+                atualizar_cache=atualizar_cache,
             )
 
             if not data:
@@ -933,6 +937,7 @@ class RSIService:
             dict[str, dict[str, Any]]
         ] = None,
         salvar: bool = True,
+        atualizar_cache_market_data: bool = True,
         on_result_completed: (
             Callable[[dict[str, Any]], None] | None
         ) = None,
@@ -1065,6 +1070,9 @@ class RSIService:
                         intervalo=intervalo,
                         ticker=ticker,
                         salvar=salvar,
+                        atualizar_cache_market_data=(
+                            atualizar_cache_market_data
+                        ),
                     )
                 )
 
@@ -1086,7 +1094,7 @@ class RSIService:
                             intervalo,
                         )
 
-            except ccxt.NetworkError as exc:
+            except (ccxt.NetworkError, requests.RequestException) as exc:
 
                 logger.warning(
                     "Erro de rede | "
@@ -1497,7 +1505,7 @@ class RSIService:
                 ],
             )
 
-            logger.info(
+            logger.debug(
                 "RSI atualizado | "
                 "symbol=%s | "
                 "intervalo=%s | "
@@ -1575,7 +1583,7 @@ class RSIService:
             ],
         )
 
-        logger.info(
+        logger.debug(
             "Novo RSI salvo | "
             "symbol=%s | "
             "intervalo=%s | "

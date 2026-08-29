@@ -64,7 +64,10 @@ class MarketService:
     # CACHE
     # ==========================================================
 
-    DEFAULT_CACHE_TTL = 300
+    # Ranking e market cap enriquecem a leitura, mas não podem competir com
+    # o cálculo de RSI no fechamento de um candle. Quinze minutos reduz a
+    # pressão na API pública da CoinGecko e ainda mantém os metadados úteis.
+    DEFAULT_CACHE_TTL = 900
 
     # Para o projeto atual, uma página é suficiente para obter
     # os principais ativos por market cap.
@@ -1109,6 +1112,8 @@ class MarketService:
     def get_market_data(
         self,
         symbol: str,
+        *,
+        atualizar_cache: bool = True,
     ) -> Optional[
         dict[str, Any]
     ]:
@@ -1152,7 +1157,7 @@ class MarketService:
         # GARANTIR CACHE
         # ------------------------------------------------------
 
-        if not self._cache_valido():
+        if atualizar_cache and not self._cache_valido():
 
             sucesso = (
                 self._carregar_cache()

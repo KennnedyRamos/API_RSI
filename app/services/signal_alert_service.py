@@ -32,6 +32,7 @@ class SignalAlertService:
     DEFAULT_MAX_DISPATCH_PER_CYCLE = 10
     DEFAULT_MAX_ATTEMPTS = 5
     MAX_ALERT_AGE = timedelta(minutes=1)
+    SENDING_RECOVERY_DELAY = timedelta(seconds=15)
 
     def __init__(
         self,
@@ -254,6 +255,17 @@ class SignalAlertService:
             if expirar_pendentes
             else 0
         )
+        recuperadas = self.delivery_repository.recuperar_envios_interrompidos(
+            cutoff=(
+                datetime.now(timezone.utc).replace(tzinfo=None)
+                - self.SENDING_RECOVERY_DELAY
+            ),
+        )
+        if recuperadas:
+            logger.warning(
+                "Entregas Telegram recuperadas após lease vencido | total=%s",
+                recuperadas,
+            )
         if limite_efetivo == 0:
             return {
                 "sent": 0,

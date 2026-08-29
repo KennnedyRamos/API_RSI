@@ -12,8 +12,9 @@ from database.models.notification_delivery import NotificationDelivery
 class NotificationDeliveryRepository:
     """Fila outbox para canais externos, inicialmente o Telegram."""
 
-    EXPIRED_STATUSES = ("PENDING", "RETRY")
+    EXPIRED_STATUSES = ("PENDING", "RETRY", "SENDING")
     EXPIRATION_REASON = "Expirada: alerta gerado há mais de 1 minuto."
+    RECOVERY_REASON = "Recuperada após envio Telegram interrompido."
 
     @staticmethod
     def criar_ou_buscar(
@@ -141,6 +142,41 @@ class NotificationDeliveryRepository:
         if expiradas:
             db.session.commit()
         return expiradas
+
+    @classmethod
+    def recuperar_envios_interrompidos(
+        cls,
+        *,
+        cutoff: datetime,
+    ) -> int:
+        """Devolve à fila envios que ficaram presos em ``SENDING``.
+
+        O estado ``SENDING`` é persistido antes da chamada HTTP para que uma
+        queda do processo não faça a entrega desaparecer. Se o processo cair
+        nesse intervalo, o próximo loop recupera somente envios cujo lease já
+        venceu. Como a API do Telegram não oferece chave de idempotência, a
+        semântica continua sendo *at-least-once*.
+        """
+
+        agora = datetime.now(timezone.utc).replace(tzinfo=None)
+        recuperadas = (
+            NotificationDelivery.query
+            .filter(
+                NotificationDelivery.status == "SENDING",
+                NotificationDelivery.updated_at < cutoff,
+            )
+            .update(
+                {
+                    NotificationDelivery.status: "RETRY",
+                    NotificationDelivery.available_at: agora,
+                    NotificationDelivery.last_error: cls.RECOVERY_REASON,
+                },
+                synchronize_session=False,
+            )
+        )
+        if recuperadas:
+            db.session.commit()
+        return recuperadas
 
     @staticmethod
     def marcar_enviando(

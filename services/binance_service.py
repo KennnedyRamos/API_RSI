@@ -234,6 +234,16 @@ class BinanceService:
         Determina se uma exceção permite retry.
         """
 
+        if isinstance(exc, requests.HTTPError):
+            response = exc.response
+            if response is None:
+                return True
+
+            # Erros de validação, par removido e outras respostas 4xx não
+            # melhoram com retry. Repetimos somente throttling/timeout e
+            # indisponibilidades transitórias da exchange.
+            return response.status_code in (408, 429) or response.status_code >= 500
+
         return isinstance(
             exc,
             (
@@ -1048,9 +1058,10 @@ class BinanceService:
             if symbol not in tickers
         ]
         if ausentes:
-            raise ValueError(
-                "A Binance não retornou ticker para: "
-                f"{', '.join(ausentes)}."
+            logger.warning(
+                "A Binance não retornou ticker para alguns pares; "
+                "eles serão ignorados neste ciclo | symbols=%s",
+                ", ".join(ausentes),
             )
 
         logger.info(

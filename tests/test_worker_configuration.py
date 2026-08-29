@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+import requests
+
 from services.binance_service import BinanceService
+from services.market_service import MarketService
 from workers.rsi_worker import RSIWorker
 
 
@@ -395,3 +399,57 @@ def test_ohlcv_uses_reduced_public_endpoint():
             BinanceService.TICKERS_REQUEST_TIMEOUT,
         )
     ]
+
+
+def test_binance_does_not_retry_permanent_http_client_errors():
+    service = object.__new__(BinanceService)
+    response = requests.Response()
+    response.status_code = 400
+
+    assert service._deve_repetir(
+        requests.HTTPError(response=response),
+    ) is False
+
+
+def test_market_service_can_read_stale_cache_without_refresh():
+    service = MarketService()
+    try:
+        service._cache = {
+            "BTC": {
+                "market_cap": 2_000_000_000_000.0,
+                "ranking": 1,
+            }
+        }
+        service._cache_timestamp = 0.0
+        service._carregar_cache = lambda: (_ for _ in ()).throw(
+            AssertionError("The cache must not refresh on the critical path."),
+        )
+
+        assert service.get_market_data(
+            "BTC/USDT",
+            atualizar_cache=False,
+        ) == {
+            "market_cap": 2_000_000_000_000.0,
+            "ranking": 1,
+        }
+    finally:
+        service.close()
+
+
+def test_worker_updates_heartbeat_file(tmp_path):
+    worker = build_worker(FakeBinance())
+    worker._heartbeat_file = tmp_path / "rsi-worker.heartbeat"
+
+    worker._registrar_heartbeat()
+
+    assert worker._heartbeat_file.exists()
+
+
+def test_worker_rejects_unsafe_timeframe_parallelism():
+    with pytest.raises(ValueError, match="max_timeframe_workers deve ser 1"):
+        RSIWorker(
+            rsi_service_instance=build_worker(FakeBinance()).rsi_service,
+            binance=FakeBinance(),
+            market=SimpleNamespace(),
+            max_timeframe_workers=2,
+        )

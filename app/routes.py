@@ -40,6 +40,20 @@ LIMITE_MAXIMO = 500
 # HELPERS
 # ==============================================================
 
+def _validar_intervalo(intervalo: str) -> str:
+    """Normaliza e valida um timeframe aceito pela Binance."""
+    intervalo = str(intervalo).strip()
+    if not intervalo:
+        intervalo = DEFAULT_INTERVALO
+    if intervalo not in BinanceService.TIMEFRAMES_PERMITIDOS:
+        raise ValueError(
+            "Timeframe inválido: "
+            f"{intervalo}. Permitidos: "
+            f"{', '.join(BinanceService.TIMEFRAMES_PERMITIDOS)}."
+        )
+    return intervalo
+
+
 def _obter_intervalo() -> str:
     """
     Obtém o timeframe informado na query string.
@@ -69,7 +83,7 @@ def _obter_intervalo() -> str:
             f"{', '.join(BinanceService.TIMEFRAMES_PERMITIDOS)}."
         )
 
-    return intervalo
+    return _validar_intervalo(intervalo)
 
 
 def _obter_limite(
@@ -648,7 +662,7 @@ def api_rsi_all():
 
         if intervalo:
 
-            intervalo = intervalo.strip()
+            intervalo = _validar_intervalo(intervalo)
 
         logger.debug(
             "Consulta RSI ALL | "
@@ -1178,6 +1192,8 @@ def rsi_intervalo_legacy(
 
         try:
 
+            intervalo = _validar_intervalo(intervalo)
+
             registros = (
                 RSIRepository.buscar_por_intervalo(
                     intervalo=intervalo,
@@ -1197,6 +1213,10 @@ def rsi_intervalo_legacy(
                     "total": len(data),
                 }
             )
+
+        except ValueError as exc:
+
+            return _resposta_erro(str(exc), 400)
 
         except Exception:
 

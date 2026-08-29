@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from app import create_app
@@ -148,6 +150,11 @@ class RSIWorker:
     # ----------------------------------------------------------
 
     DEFAULT_MAX_TIMEFRAME_WORKERS = 1
+
+    # O Docker usa este arquivo para verificar se o loop principal continua
+    # vivo. Ele não substitui monitoramento externo, mas detecta worker preso
+    # em I/O ou encerrado enquanto a API ainda responde normalmente.
+    DEFAULT_HEARTBEAT_FILE = "/tmp/rsi-worker.heartbeat"
 
     # ==========================================================
     # CONSTRUTOR
@@ -378,6 +385,13 @@ class RSIWorker:
                 "deve ser maior que zero."
             )
 
+        if self.max_timeframe_workers != 1:
+            raise ValueError(
+                "max_timeframe_workers deve ser 1. O processamento paralelo "
+                "ainda não é seguro com a sessão do banco e clientes HTTP "
+                "compartilhados."
+            )
+
         # ------------------------------------------------------
         # ESTADO
         # ------------------------------------------------------
@@ -385,6 +399,18 @@ class RSIWorker:
         self.running = False
 
         self.app = None
+
+        # A atualização de ranking/market cap é opcional. Mantemos no máximo
+        # uma atualização CoinGecko em andamento para que ela nunca atrase a
+        # coleta de candles ou o envio de um alerta recente.
+        self._market_refresh_lock = threading.Lock()
+        self._market_refresh_thread: threading.Thread | None = None
+        self._heartbeat_file = Path(
+            os.getenv(
+                "WORKER_HEARTBEAT_FILE",
+                self.DEFAULT_HEARTBEAT_FILE,
+            )
+        )
 
         # ------------------------------------------------------
         # CONTROLE DOS TIMEFRAMES
@@ -1344,6 +1370,49 @@ class RSIWorker:
 
             return {}
 
+    def _atualizar_market_data_em_segundo_plano(
+        self,
+        symbols: list[str],
+    ) -> None:
+        """Atualiza o cache CoinGecko sem bloquear RSI, banco ou Telegram."""
+
+        if not symbols:
+            return
+
+        if not self._market_refresh_lock.acquire(blocking=False):
+            logger.debug("Atualização CoinGecko já está em andamento.")
+            return
+
+        def atualizar() -> None:
+            try:
+                self._precarregar_market_data(symbols)
+            except Exception:
+                logger.exception("Falha na atualização assíncrona de Market Data.")
+            finally:
+                self._market_refresh_lock.release()
+
+        self._market_refresh_thread = threading.Thread(
+            target=atualizar,
+            name="rsi-market-data-refresh",
+            daemon=True,
+        )
+        self._market_refresh_thread.start()
+
+    def _registrar_heartbeat(self) -> None:
+        """Atualiza o sinal de vida consumido pelo healthcheck do worker."""
+
+        try:
+            self._heartbeat_file.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            self._heartbeat_file.touch()
+        except OSError:
+            logger.warning(
+                "Não foi possível atualizar heartbeat do worker | path=%s",
+                self._heartbeat_file,
+            )
+
     # ==========================================================
     # PROCESSAR TIMEFRAME
     # ==========================================================
@@ -1385,6 +1454,7 @@ class RSIWorker:
                 symbols=symbols,
                 tickers=tickers,
                 salvar=True,
+                atualizar_cache_market_data=False,
                 on_result_completed=on_result_completed,
             )
         )
@@ -1874,6 +1944,46 @@ class RSIWorker:
         consumidas = alertas["sent"] + alertas["retried"]
         return alertas, consumidas
 
+    def _despachar_alertas_pendentes(self) -> None:
+        """Processa retries da outbox entre fechamentos de candles.
+
+        Um retry do Telegram não deve esperar o próximo candle de 5 minutos:
+        com a política de expiração de um minuto ele seria perdido antes disso.
+        """
+
+        despachar = getattr(
+            self.alert_service,
+            "despachar_pendentes",
+            None,
+        )
+        if not callable(despachar):
+            return
+
+        try:
+            limite = max(
+                0,
+                int(
+                    getattr(
+                        self.alert_service,
+                        "max_dispatch_per_cycle",
+                        0,
+                    )
+                ),
+            )
+            metricas = despachar(limite=limite)
+            if any(
+                metricas.get(chave, 0)
+                for chave in ("sent", "retried", "expired")
+            ):
+                logger.info(
+                    "Outbox Telegram processada entre candles | %s",
+                    metricas,
+                )
+        except Exception:
+            logger.exception(
+                "Falha ao processar retries Telegram entre candles.",
+            )
+
     # ==========================================================
     # PROCESSAR CICLO
     # ==========================================================
@@ -2083,27 +2193,10 @@ class RSIWorker:
         # MARKET DATA
         # ======================================================
 
-        self._precarregar_market_data(
-            symbols
-        )
-
-        if not self.running:
-
-            logger.info(
-                "Worker interrompido "
-                "após Market Data."
-            )
-
-            return self._montar_resultado_final(
-                ciclo_inicio=ciclo_inicio,
-                inicio_monotonic=inicio_monotonic,
-                symbols=symbols,
-                resultados=resultados,
-                erros=erros,
-                intervalos_processados=(
-                    intervalos_vencidos
-                ),
-            )
+        # CoinGecko é enriquecimento complementar. A atualização ocorre em
+        # segundo plano; durante a coleta usamos o último cache conhecido
+        # (inclusive expirado) e nunca aguardamos a rede antes do Telegram.
+        self._atualizar_market_data_em_segundo_plano(symbols)
 
         # ======================================================
         # TIMEFRAMES
@@ -2555,6 +2648,7 @@ class RSIWorker:
         self._aquecer_cache_mercados_binance()
 
         self._inicializar_agenda()
+        self._registrar_heartbeat()
 
         logger.info(
             "=================================================="
@@ -2664,6 +2758,11 @@ class RSIWorker:
                                 self._agendar_proxima_execucao(
                                     intervalo
                                 )
+
+                    else:
+                        self._despachar_alertas_pendentes()
+
+                    self._registrar_heartbeat()
 
                     # ------------------------------------------
                     # PARADA

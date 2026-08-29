@@ -31,6 +31,12 @@ def test_rsi_rejects_invalid_timeframe(client, query):
     assert "Timeframe inválido" in response.get_json()["error"]
 
 
+def test_rsi_all_rejects_invalid_timeframe(client):
+    response = client.get("/api/v1/rsi/all?intervalo=invalido")
+
+    assert response.status_code == 400
+
+
 def test_current_signals_returns_latest_snapshot(client, app):
     with app.app_context():
         registro = RSIData(

@@ -88,6 +88,20 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          from pathlib import Path;
+          import sys, time;
+          heartbeat = Path('/tmp/rsi-worker.heartbeat');
+          sys.exit(0 if heartbeat.exists() and time.time() - heartbeat.stat().st_mtime < 90 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     logging:
       driver: local
       options:
